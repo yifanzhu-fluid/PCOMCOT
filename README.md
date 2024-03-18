@@ -10,4 +10,5 @@ PCOMCOT is developed by Yifan Zhu and Prof. Chao An at Shanghai Jiao Tong Univer
 
 If you find code bugs or plan to use PCOMCOT commercially, please contact us via the E-mails below.
 
-zyftop@sjtu.edu.cn (Yifan Zhu)      anchao@sjtu.edu.cn (Chao An)
+zyftop@sjtu.edu.cn (Yifan Zhu)
+anchao@sjtu.edu.cn (Chao An)
