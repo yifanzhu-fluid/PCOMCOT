@@ -8,7 +8,10 @@ The main features of PCOMCOT include:
 4) One-way and two-way grid nesting for cross-scale tsunami modeling;
 5) Parallel implementation with MPI library.
 
-PCOMCOT is developed by Yifan Zhu and Prof. Chao An at Shanghai Jiao Tong University. We make the source code open without limitations on its redistribution and modification for research purposes. The current version of PCOMCOT is 2.0. We will keep updating the source code, manual, and examples when new features or modules are added in the future. 
+PCOMCOT is developed by Yifan Zhu and Prof. Chao An at Shanghai Jiao Tong University. 
+We make the source code open without limitations on its redistribution and modification for research purposes. 
+The current version of PCOMCOT (v2.0) is parallelized with MPI library, and a GPU-accelerated version is under development for faster performance.
+We will keep updating the source code, manual, and examples when new features or modules are added.
 
 If you find code bugs or plan to use PCOMCOT commercially, please contact us via the E-mails below.
 
