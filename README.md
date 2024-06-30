@@ -16,7 +16,7 @@ We will keep updating the source code, manual, and examples when new features or
 To publish papers containing use of PCOMCOT or mentioning this model, please cite the articles about the algorithms and applications of PCOMCOT.
 The articles on PCOMCOT include:
 
-[1] Zhu, Y., C. An, H. Yu, W. Zhang, and X. Chen (2024). High-resolution tsunami hazard assessment for the Guangdong-Hong Kong-Macao Greater Bay Area based on a non-hydrostatic tsunami model. Science China Earth Sciences, 67. https://doi.org/10.1007/s11430-023-1300-9
+* Zhu, Y., C. An, H. Yu, W. Zhang, and X. Chen (2024). High-resolution tsunami hazard assessment for the Guangdong-Hong Kong-Macao Greater Bay Area based on a non-hydrostatic tsunami model. Science China Earth Sciences, 67. https://doi.org/10.1007/s11430-023-1300-9
 
 
 If you find code bugs or plan to use PCOMCOT commercially, please contact us via the E-mails below.
