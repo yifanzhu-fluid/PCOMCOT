@@ -13,7 +13,7 @@ We make the source code open without limitations on its redistribution and modif
 The current version of PCOMCOT (v2.0) is parallelized with MPI library, and a GPU-accelerated version is under development for faster performance.
 We will keep updating the source code, manual, and examples when new features or modules are added.
 
-To publish papers containing use of PCOMCOT or mentioning this model, please cite the articles about the algorithms and applications of PCOMCOT.
+To publish papers containing use of PCOMCOT or mentioning this model, please cite articles about the algorithms and applications of PCOMCOT.
 The articles on PCOMCOT include:
 * Zhu, Y., C. An, H. Yu, W. Zhang, and X. Chen (2024). High-resolution tsunami hazard assessment for the Guangdong-Hong Kong-Macao Greater Bay Area based on a non-hydrostatic tsunami model. Science China Earth Sciences, 67. https://doi.org/10.1007/s11430-023-1300-9
 * An, C., Liu, H., Ren, Z., & Yuan, Y. (2018). Prediction of tsunami waves by uniform slip models. Journal of Geophysical Research: Oceans, 123, 8366–8382. https://doi.org/10.1029/2018JC014363
