@@ -1,4 +1,5 @@
 *.mod
+*.o
 *.log
-*.dat
 *.tex
+*.bib
