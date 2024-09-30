@@ -6,11 +6,13 @@ The main features of PCOMCOT include:
 2) Moving boundary technique for run-up and run-down;
 3) Eddy-viscosity scheme for wave breaking;
 4) One-way and two-way grid nesting for cross-scale tsunami modeling;
-5) Parallel implementation with MPI library.
+5) Parallel implementation on both CPU and GPU.
 
 PCOMCOT is developed by Yifan Zhu and Prof. Chao An at Shanghai Jiao Tong University. 
-We make the source code open without limitations on its redistribution and modification for research purposes. 
-The current version of PCOMCOT (v2.0) is parallelized with MPI library, and a GPU-accelerated version is under development for faster performance.
+We make the source code open without limitations on its redistribution and modification for research purposes.
+For parallel implementation of PCOMCOT, we provide both a CPU and GPU version of source code.
+The CPU version is parallelized using the MPI library, can can run on a multiple CPU cores of HPC cluster.
+The GPU version is parallelized using the CUDA programming model, and can run on a single NVIDIA GPU.
 We will keep updating the source code, manual, and examples when new features or modules are added.
 
 To publish papers containing use of PCOMCOT or mentioning this model, please cite articles about the algorithms and applications of PCOMCOT.
