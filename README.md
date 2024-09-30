@@ -10,9 +10,7 @@ The main features of PCOMCOT include:
 
 PCOMCOT is developed by Yifan Zhu and Prof. Chao An at Shanghai Jiao Tong University. 
 We make the source code open without limitations on its redistribution and modification for research purposes.
-For parallel implementation of PCOMCOT, we provide both a CPU and GPU version of source code.
-The CPU version is parallelized using the MPI library, can can run on a multiple CPU cores of HPC cluster.
-The GPU version is parallelized using the CUDA programming model, and can run on a single NVIDIA GPU.
+For parallel implementation of PCOMCOT, we provide both a CPU version using the MPI library, and a GPU version based on CUDA FORTRAN.
 We will keep updating the source code, manual, and examples when new features or modules are added.
 
 To publish papers containing use of PCOMCOT or mentioning this model, please cite articles about the algorithms and applications of PCOMCOT.
