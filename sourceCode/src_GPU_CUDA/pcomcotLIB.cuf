@@ -1,0 +1,2887 @@
+subroutine initializeCUDA(GP)
+
+use cudafor
+use cublas_v2
+use cusparse
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+integer*4   ::  nDevices, ierror
+
+write(*,*)
+write(*,*)             '####################################################'
+write(*,*)             '#                                                  #'
+write(*,'(a,f4.1,a)') ' #        PCOMCOT-GPU Simulation Version',GP%version,'        #'
+#ifdef DOUBLE
+    write(*,*)         '#            (FLOAT PRECISION: DOUBLE)             #'
+#else
+    write(*,*)         '#            (FLOAT PRECISION: SINGLE)             #'
+#endif
+write(*,*)             '#                                                  #'
+write(*,*)             '####################################################'
+write(*,*)
+write(*,*) "initializing CUDA environment ..."
+
+!/// inquire the number of CUDA-enabled devices ///!
+ierror = cudaGetDeviceCount(nDevices)
+if(nDevices.eq.0) then
+    write(*,*) "ERROR: no CUDA device found in the computer!"
+    stop
+elseif(nDevices.gt.1) then
+    write(*,*) "More than one CUDA devices found in the computer, only Device 0 is used."
+endif
+
+!/// inquire properties of device 0 ///!
+ierror = cudaGetDeviceProperties(GP%Prop,0)
+if(ierror.ne.cudaSuccess) then
+    write(*,*) "ERROR: ", cudaGetErrorString(ierror)
+    stop
+endif
+write(*,*)
+write(*,*) '****** General Properties of CUDA Device ******'
+write(*,'(a,a)')       ' Device Name               : ', TRIM(ADJUSTL(GP%Prop%name))
+write(*,'(a,i0,a,i0)') ' Compute Capability        : ', GP%Prop%major, '.', GP%Prop%minor
+if(GP%Prop%major.lt.6) then
+    write(*,*) "ERROR: Device Compute Capability is lower than 6.0!"
+    stop
+endif
+write(*,'(a,i0)')              ' Number of Multiprocessors : ', GP%Prop%multiProcessorCount
+write(*,'(a,i0)')              ' Max Threads per MP        : ', GP%Prop%maxThreadsPerMultiprocessor
+write(*,'(a)',advance='no')    ' ECC Enabled               : '
+if(GP%Prop%ECCEnabled.eq.1) then
+    write(*,'(a)') 'yes'
+else
+    write(*,'(a)') 'no'
+endif
+write(*,'(a,i0,a)')            ' Global Memory             : ', NINT(GP%Prop%totalGlobalMem/1024.0**3), 'GB'
+if(GP%Prop%totalGlobalMem.lt.4*1024.0**3) then
+    write(*,*) "WARNING: Device Global Memory is less than 4GB, space may be insufficient for variable allocation."
+endif
+write(*,"(a,2(i0,', '),i0,a)") ' Max Grid Dimensions       : (', GP%Prop%maxGridSize, ')'
+write(*,"(a,2(i0,', '),i0,a)") ' Max Block Dimensions      : (', GP%Prop%maxThreadsDim, ')'
+write(*,'(a,i0)')              ' Max Threads per Block     : ', GP%Prop%maxThreadsPerBlock
+
+!/// create cuda event for timing ///!
+ierror = cudaEventCreate(startEvent)
+ierror = cudaEventCreate(stopEvent)
+
+!/// create handles of cuBLAS and cuSPARSE ///!
+ierror = cublasCreate(cublasH)
+ierror = cusparseCreate(cusparseH)
+
+end subroutine initializeCUDA
+
+
+
+subroutine readConfig(GP)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+integer*4       ::  ios, i, indx1, indx2, ierror
+real(fp_kind)   ::  version
+character(999)  ::  s
+
+write(*,*)
+write(*,*) "reading pcomcot control file ..."
+open(666,file=TRIM(ADJUSTL(GP%COMCOTParametersFileName)),status='old',form='formatted',action='read',iostat=ios)
+if(ios.ne.0) then    
+    write(*,*) 'ERROR: cann''t find file ',TRIM(ADJUSTL(GP%COMCOTParametersFileName))
+    write(*,*)
+    stop
+endif
+    
+do i = 1,3
+    read(666, '(a)') s
+enddo
+indx1 = INDEX(s, '(v') + 2
+indx2 = INDEX(s, ')') - 1
+read(s(indx1:indx2),*) version
+if(ABS(GP%Version-version).gt.0.05) then
+    write(*,*)
+    write(*,'(a,f4.1)') 'ERROR: pcomcot.ctl version should be ', GP%Version
+    write(*,*)
+    stop
+endif
+    
+read(666, '(4/)')
+read(666, '(49x,i30)')      GP%PurposeCalculation
+read(666, '(49x,i30)')      GP%InitialConditionType
+read(666, '(49x,i30)')      GP%CoordinatesType
+read(666, '(49x,f30.6)')    GP%TotalTime
+read(666, '(49x,f30.6)')    GP%dt
+read(666, '(49x,f30.6)')    GP%DTSaveData
+read(666, '(49x,i30)')      GP%SaveFlux
+read(666, '(49x,i30)')      GP%SaveDynamicPressure
+read(666, '(49x,i30)')      GP%MinGridsPerNode
+read(666, '(49x,i30)')      GP%FeedbackToParentLayer
+read(666, '(3/)')
+read(666, '(49x,i30)')      GP%HorizontalMotion
+read(666, '(49x,i30)')      GP%KajiuraFilter
+read(666, '(49x,i30)')      GP%UseAverageDepth
+read(666, '(49x,f30.6)')    GP%MinKajiuraDepth
+read(666, '(3/)')
+read(666, '(49x,i30)')      GP%Nonlinearity
+read(666, '(49x,i30)')      GP%Dispersion
+read(666, '(49x,i30)')      GP%DepthVariability
+read(666, '(49x,f30.6)')    GP%MinDispersionDepth
+read(666, '(49x,i30)')      GP%Breaking
+read(666, '(49x,i30)')      GP%FluxCenter
+read(666, '(49x,f30.6)')    GP%FrCap
+read(666, '(49x,f30.6)')    GP%DTFilterData
+read(666, '(3/)')
+read(666, '(49x,i30)')      GP%BoundaryConditionType
+read(666, '(49x,f30.6)')    GP%SpongeWidthX
+read(666, '(49x,f30.6)')    GP%SpongeWidthY
+read(666, '(49x,f30.6)')    GP%MaxSpongeMANNING
+read(666, '(49x,f30.6)')    GP%SpongeDampingA
+read(666, '(49x,f30.6)')    GP%SpongeDampingR
+read(666, '(3/)')
+read(666, '(49x,f30.6)')    GP%PermanentDryLimit
+read(666, '(49x,f30.6)')    GP%MinWaterDepth
+read(666, '(49x,f30.6)')    GP%FrictionDepthLimit
+read(666, '(49x,f30.6)')    GP%MANNING 
+read(666, '(3/)')
+read(666, '(49x,f30.6)')    GP%SourceStartX
+read(666, '(49x,f30.6)')    GP%SourceEndX
+read(666, '(49x,f30.6)')    GP%SourceDX
+read(666, '(49x,f30.6)')    GP%SourceStartY
+read(666, '(49x,f30.6)')    GP%SourceEndY
+read(666, '(49x,f30.6)')    GP%SourceDY
+read(666, '(49x,i30)')      GP%SourceBasisFunctionType
+read(666, '(49x,f30.6)')    GP%GaussianRatio
+read(666, '(49x,f30.6)')    GP%SigmoidCoefficient
+close(666)
+    
+GP%MinKajiuraDepth = MAX(GP%MinKajiuraDepth,PCOMCOT_REAL_ONE*5.0E-2)
+GP%MinDispersionDepth = MAX(GP%MinDispersionDepth, PCOMCOT_REAL_ONE*5.0E-2)
+GP%FrCap = MAX(GP%FrCap,PCOMCOT_REAL_ONE*1.0E-1)
+GP%MaxSpongeMANNING = MAX(GP%MaxSpongeMANNING,PCOMCOT_REAL_ONE*0.0)
+GP%SpongeDampingA = MAX(GP%SpongeDampingA, PCOMCOT_REAL_ONE*1.0)
+GP%PermanentDryLimit = MAX(GP%PermanentDryLimit, PCOMCOT_REAL_ONE*0.0)
+GP%MinWaterDepth = MAX(GP%MinWaterDepth, PCOMCOT_REAL_ONE*1.0E-3)
+GP%FrictionDepthLimit = MAX(GP%FrictionDepthLimit, PCOMCOT_REAL_ONE*5.0E-3)
+GP%MANNING = MAX(GP%MANNING, PCOMCOT_REAL_ONE*0.0)
+GP%NDTFilterData = MAX(1, NINT(GP%DTFilterData/GP%dt))
+    
+if(GP%BoundaryConditionType.ne.1.and.GP%BoundaryConditionType.ne.2) then
+    write(*,*) "ERROR: only wall and sponge boundary are supported."
+    stop
+endif
+    
+end subroutine ReadConfig
+
+
+
+subroutine checkFiles(GP)
+      
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+integer*4       ::  iLayer, ios, ierror
+character(999)  ::  fn1, fn2, s
+logical         ::  fe, fe2
+    
+write(*,*)
+write(*,*) "checking files that are needed ..."
+write(*,*)
+    
+write(*,'(a)',advance='no') "  Bathymetry Data File              :  "
+GP%NumLayers = 0
+do iLayer = 1,99
+    write(fn1,'(a,i2.2,a)') TRIM(ADJUSTL(GP%BathymetryFilePrefix)),iLayer,'.nf'
+    inquire(file=fn1, exist=fe)
+    write(fn2,'(a,i2.2,a)') TRIM(ADJUSTL(GP%BathymetryFilePrefix)),iLayer,'.xyz'
+    inquire(file=fn2, exist=fe2)
+    if(fe.or.fe2) then
+    GP%NumLayers = GP%NumLayers + 1
+    if(GP%NumLayers.ne.1.and.MOD(GP%NumLayers-1,5).eq.0) then
+        write(*,*)
+        write(*,'(a)',advance='no') "                                       "
+    elseif(GP%NumLayers.ne.1) then
+        write(*,'(a)',advance='no') ", "
+    endif
+    if(fe) then
+        write(*,'(a11)',advance='no') ADJUSTL(fn1)
+    else
+        write(*,'(a11)',advance='no') ADJUSTL(fn2)
+    endif
+    endif
+enddo
+write(*,*)
+if(GP%NumLayers.eq.0) then
+    write(*,*) "ERROR: cannot find any bathymetry data files:  layerXX.nf or layerXX.xyz"
+    stop
+endif
+
+if(GP%PurposeCalculation.eq.1.and.GP%InitialConditionType.eq.0) then
+    fn1 = TRIM(ADJUSTL(GP%InitialElevationFilePrefix))//'.nf'
+    inquire(file=fn1, exist=fe)
+    fn2 = TRIM(ADJUSTL(GP%InitialElevationFilePrefix))//'.xyz'
+    inquire(file=fn2, exist=fe2)
+    if((.not.fe).and.(.not.fe2)) then
+        write(*,*) 'ERROR: cannot find initial water elevation file:  ',TRIM(ADJUSTL(fn1)),' or ',TRIM(ADJUSTL(fn2))
+        stop
+    endif
+    if(fe) then
+        GP%InitialElevationFileName = fn1
+        GP%InitialElevationFileFormat = 1
+    elseif(fe2) then
+        GP%InitialElevationFileName = fn2
+        GP%InitialElevationFileFormat = 2
+    endif
+    write(*,'(a,a)') '  Initial Water Elevation Data File :  ',TRIM(ADJUSTL(GP%InitialElevationFileName))
+    fn1 = TRIM(ADJUSTL(GP%InitialMFileName)) 
+    inquire(file=fn1,exist=fe)
+    fn2 = TRIM(ADJUSTL(GP%InitialNFileName))
+    inquire(file=fn2,exist=fe2)
+    if(fe.or.fe2) then
+        write(*,'(a)',advance='no') "  Initial Flux Data File            :  "
+        if(fe) then
+            write(*,'(a)',advance='no') TRIM(ADJUSTL(GP%InitialMFileName))
+        endif
+        if(fe2) then
+            if(fe) then
+                write(*,'(a)',advance='no') ' , '//TRIM(ADJUSTL(GP%InitialNFileName))
+            else
+                write(*,'(a)',advance='no') TRIM(ADJUSTL(GP%InitialNFileName))
+            endif
+        endif
+        write(*,*)
+    endif
+endif
+          
+if((GP%PurposeCalculation.eq.1.and.GP%InitialConditionType.eq.1).or.(GP%PurposeCalculation.eq.2)) then
+    inquire(file=TRIM(ADJUSTL(GP%FaultParametersFileName)),exist=fe)
+    if(.not.fe) then
+        write(*,*) 'ERROR: cannot find multi-fault information file:  ', TRIM(ADJUSTL(GP%FaultParametersFileName))
+        stop
+    endif
+    write(*,'(a,a)') '  Multi-Fault Information File      :  ', TRIM(ADJUSTL(GP%FaultParametersFileName))
+endif
+    
+inquire(file=TRIM(ADJUSTL(GP%StationFileName)),exist=fe)
+if(.not.fe) then
+    write(*,*) 'ERROR: cannot find stations information file:  ',TRIM(ADJUSTL(GP%StationFileName))
+    stop
+endif
+write(*,'(a,a)') '  Stations coordinates file         :  ',TRIM(ADJUSTL(GP%StationFileName))
+    
+inquire(file=TRIM(ADJUSTL(GP%ResultPath)),exist=fe)
+if(.not.fe) then
+    call system('mkdir '//TRIM(ADJUSTL(GP%ResultPath)))
+endif
+    
+end subroutine checkFiles
+
+
+
+subroutine getBathymetryDataSize(GP, LP)
+      
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4       ::  iLayer, ierror, iLayerCheck
+character(999)  ::  fn1, fn2
+logical         ::  fe, fe2
+real(fp_kind)   ::  x1, x2, x, y1, y
+integer*4       ::  i, ios, endoffile
+    
+write(*,*)
+write(*,*) "getting bathymetry data size ..."
+write(*,*)
+    
+iLayer = 0
+do iLayerCheck = 1,99
+write(fn1,'(a,i2.2,a)') TRIM(ADJUSTL(GP%BathymetryFilePrefix)),iLayerCheck,'.nf'
+inquire(file=fn1, exist=fe)
+write(fn2,'(a,i2.2,a)') TRIM(ADJUSTL(GP%BathymetryFilePrefix)),iLayerCheck,'.xyz'
+inquire(file=fn2, exist=fe2)
+if(fe.or.fe2) then
+    iLayer = iLayer + 1
+    if(fe) then
+        LP(iLayer)%BathymetryFileName = fn1
+        LP(iLayer)%BathymetryFileFormat = 1
+    elseif(fe2) then
+        LP(iLayer)%BathymetryFileName = fn2
+        LP(iLayer)%BathymetryFileFormat = 2
+    endif
+    if(LP(iLayer)%BathymetryFileFormat.eq.1) then
+        call getBathymetryDataSizeNetCDF(GP, LP, iLayer)
+    else
+        open(23,file=TRIM(ADJUSTL(LP(iLayer)%BathymetryFileName)),status='old',form='formatted',action='read',iostat=ios)
+        read(23,*) x1,y1
+        if(iLayer.eq.1) then
+            GP%StartEastWest = 0
+            if((GP%CoordinatesType.eq.0).and.(x1.ge.0).and.(x1.le.180))then
+                GP%StartEastWest = 1
+            elseif((GP%CoordinatesType.eq.0).and.(x1.gt.180.or.x1.lt.0.0))then
+                GP%StartEastWest = 2
+            endif
+        endif
+        if((GP%StartEastWest.eq.1).and.(x1.lt.0)) x1 = x1+360
+        if((GP%StartEastWest.eq.2).and.(x1.gt.180)) x1 = x1-360
+        LP(iLayer)%xmin = x1; LP(iLayer)%ymin = y1
+        read(23,*) x2
+        if((GP%StartEastWest.eq.1).and.(x2.lt.0)) x2 = x2+360
+        if((GP%StartEastWest.eq.2).and.(x2.gt.180)) x2 = x2-360
+        LP(iLayer)%dx = x2-x1
+        LP(iLayer)%NX = 2; LP(iLayer)%NY = 1
+        do
+            read(23,*,iostat=ios) x,y
+            if((GP%StartEastWest.eq.1).and.(x.lt.0)) x = x+360
+            if((GP%StartEastWest.eq.2).and.(x.gt.180)) x = x-360
+            if(ABS(x-x1).gt.0.1*LP(iLayer)%dx) then
+                LP(iLayer)%NX = LP(iLayer)%NX+1;  LP(iLayer)%xmax = x
+            else
+                LP(iLayer)%NY = LP(iLayer)%NY+1;  LP(iLayer)%dy = y-y1
+                exit
+            endif
+        enddo
+        do i = 1,LP(iLayer)%NX-1
+            read(23,*) x, LP(iLayer)%ymax
+        enddo
+        do
+            endoffile = 0
+            do i = 1,LP(iLayer)%NX
+                read(23,*,iostat=ios) x, LP(iLayer)%ymax
+                if(ios.ne.0) then
+                    endoffile = 1
+                    exit
+                endif
+            enddo
+            if(endoffile.eq.1) exit
+            LP(iLayer)%NY = LP(iLayer)%NY + 1
+        enddo
+        close(23)
+    endif
+    
+    write(*,'(a,a11)',advance='no') '   ',ADJUSTL(LP(iLayer)%BathymetryFileName)
+    write(*,'(a,f12.3,a,f12.3,a,f15.6,a,i5)')                        &
+        ':  xmin: ',LP(iLayer)%xmin,'    xmax: ',LP(iLayer)%xmax, &
+        '    dx:',LP(iLayer)%dx,'    nx: ',LP(iLayer)%NX
+    write(*,'(a,a,f12.3,a,f12.3,a,f15.6,a,i5)')                      &
+        '              ',                                    &
+        '   ymin: ',LP(iLayer)%ymin,'    ymax: ',LP(iLayer)%ymax, &
+        '    dy:',LP(iLayer)%dy,'    ny: ',LP(iLayer)%NY
+    if(LP(iLayer)%BathymetryFileFormat.eq.2) write(*,'(a,a)') "                 ", &
+        "NOTE: xyz format, bathymetry data must vary with x first."
+    write(*,*)
+endif !if this layer exists
+enddo
+    
+end subroutine getBathymetryDataSize
+
+
+
+subroutine determineLayerDependency(GP, LP)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4       ::  ierror
+integer*4       ::  i, j, k, NumMotherLayers, NumTopLayers, IsOverlap
+real(fp_kind)   ::  p1(4,2), p2(4,2)
+    
+GP%NumLayerLevels = 0
+do i = 1,GP%NumLayers
+    NumMotherLayers = 0
+    do j = 1,GP%NumLayers
+        if(j.ne.i) then
+            if((LP(i)%xmin.ge.LP(j)%xmin).and.(LP(i)%xmax.le.LP(j)%xmax).and. &
+                (LP(i)%ymin.ge.LP(j)%ymin).and.(LP(i)%ymax.le.LP(j)%ymax)) &
+                NumMotherLayers = NumMotherLayers+1
+        endif
+    enddo
+    LP(i)%Level = NumMotherLayers + 1
+    GP%NumLayerLevels = MAX(GP%NumLayerLevels, LP(i)%Level)
+enddo
+          
+GP%TopLayer = 0; NumTopLayers = 0
+do i = 1,GP%NumLayers
+    if(LP(i)%Level.eq.1) then
+        GP%TopLayer = i
+        NumTopLayers = NumTopLayers + 1
+    endif
+enddo
+if(NumTopLayers.gt.1) then
+    write(*,'(a)',advance='no') "ERROR: more than 1 top layer found: "
+    do i = 1,GP%NumLayers
+        if(LP(i)%Level.eq.1) write(*,'(a,a)',advance='no') TRIM(ADJUSTL(LP(i)%BathymetryFileName)),'  '
+    enddo
+    write(*,*)
+    stop
+endif
+    
+do i = 1,GP%NumLayers
+    do j = 1,GP%NumLayers
+        if(i.ne.j.and.LP(i)%Level.eq.LP(j)%Level) then
+            IsOverlap = 0
+            p1(1,1) = LP(i)%xmin; p1(1,2) = LP(i)%ymin; p1(2,1) = LP(i)%xmax; p1(2,2) = LP(i)%ymin
+            p1(3,1) = LP(i)%xmax; p1(3,2) = LP(i)%ymax; p1(4,1) = LP(i)%xmin; p1(4,2) = LP(i)%ymax
+            p2(1,1) = LP(j)%xmin; p2(1,2) = LP(j)%ymin; p2(2,1) = LP(j)%xmax; p2(2,2) = LP(j)%ymin
+            p2(3,1) = LP(j)%xmax; p2(3,2) = LP(j)%ymax; p2(4,1) = LP(j)%xmin; p2(4,2) = LP(j)%ymax
+            do k = 1,4
+                if(p1(k,1).ge.p2(1,1).and.p1(k,1).le.p2(3,1).and. &
+                    p1(k,2).ge.p2(1,2).and.p1(k,2).le.p2(3,2)) then
+                    IsOverlap = 1; exit
+                endif
+            enddo
+            do k = 1,4
+                if(p2(k,1).ge.p1(1,1).and.p2(k,1).le.p1(3,1).and. &
+                    p2(k,2).ge.p1(1,2).and.p2(k,2).le.p1(3,2)) then
+                    IsOverlap = 1; exit
+                endif
+            enddo
+            if(IsOverlap.eq.1) then
+                write(*,*) "Warning: layers overlaped: ",               &
+                    TRIM(ADJUSTL(LP(i)%BathymetryFileName)), " and ",   &
+                    TRIM(ADJUSTL(LP(j)%BathymetryFileName))
+            endif
+        endif
+    enddo
+enddo
+    
+do i = 1,GP%NumLayers
+    LP(i)%Parent = 0
+    do j = 1,GP%NumLayers
+        if(LP(i)%Level-LP(j)%Level.eq.1) then
+            if((LP(i)%xmin.ge.LP(j)%xmin).and.(LP(i)%xmax.le.LP(j)%xmax).and. &
+                (LP(i)%ymin.ge.LP(j)%ymin).and.(LP(i)%ymax.le.LP(j)%ymax)) then
+                LP(i)%Parent = j; exit
+            endif
+        endif
+    enddo
+enddo
+    
+do i = 1,GP%NumLayers
+    write(*,'(a,a11)',advance='no') '   ',ADJUSTL(LP(i)%BathymetryFileName)
+    write(*,'(a,i2,a)',advance='no') ' :  Level: ',LP(i)%Level,'    Parent: '
+    if(LP(i)%Parent.ne.0) then
+        write(*,'(a11)') ADJUSTL(LP(LP(i)%Parent)%BathymetryFileName)
+    else
+        write(*,*)
+    endif
+enddo
+write(*,*)
+do i = 1,GP%NumLayers
+if(LP(i)%Level.gt.1) then
+    if(LP(i)%dx.gt.LP(LP(i)%Parent)%dx) &
+        write(*,'(a,a,a,f7.4,a,a,a,f7.4)')                           &
+        'WARNING: ',TRIM(ADJUSTL(LP(i)%BathymetryFileName)),         &
+        ' dx: ',LP(i)%dx,' larger than Parent ',                     &
+        TRIM(ADJUSTL(LP(LP(i)%Parent)%BathymetryFileName)),' dx: ', LP(LP(i)%Parent)%dx
+    if(LP(i)%dy.gt.LP(LP(i)%Parent)%dy) &
+        write(*,'(a,a,a,f7.4,a,a,a,f7.4)')                           &
+        'WARNING: ',TRIM(ADJUSTL(LP(i)%BathymetryFileName)),         &
+        ' dy: ',LP(i)%dy,' larger than Parent ',                     &
+        TRIM(ADJUSTL(LP(LP(i)%Parent)%BathymetryFileName)),' dy: ', LP(LP(i)%Parent)%dy
+endif
+enddo
+    
+end subroutine determineLayerDependency
+
+
+
+subroutine readLayerConfig(GP, LP)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4       ::  iLayer, pLayer, i, ios, ierror, HasWrong
+integer*4       ::  layerID, indx1, indx2
+integer*4       ::  nonlinear, dispersive, variableDepth, breakingWave, fluxCentered, ndt
+real(fp_kind)   ::  version, T0, dt
+character(999)  ::  ctlfile, s, fn1, fn2
+    
+write(*,*)
+write(*,*) "setting simulation parameters of each layer ..."
+write(*,*)
+!///Parameters of each layer are the same as global parameters by default ///!
+do iLayer = 1,GP%NumLayers
+    LP(iLayer)%Nonlinearity = GP%Nonlinearity
+    LP(iLayer)%Dispersion = GP%Dispersion
+    LP(iLayer)%DepthVariability = GP%DepthVariability
+    LP(iLayer)%Breaking = GP%Breaking
+    LP(iLayer)%FluxCenter = GP%FluxCenter
+    LP(iLayer)%ComputingStartTime = 0.0
+    LP(iLayer)%DTFilterData = GP%DTFilterData
+    LP(iLayer)%NDTFilterData = GP%NDTFilterData
+enddo
+    
+ctlfile = GP%COMCOTLayerCtlFileName
+open(999,file=TRIM(ADJUSTL(ctlfile)),status='old',action='read',form='formatted',iostat=ios)
+if(ios.eq.0) then
+do i = 1,3
+    read(999,'(a)') s
+enddo
+indx1 = INDEX(s,'(v') + 2
+indx2 = INDEX(s,')') -1
+read(s(indx1:indx2),*) version
+if(ABS(GP%Version-version).gt.0.05) then
+    close(999)
+    write(*,*)
+    write(*,'(a,f4.1)') 'ERROR: layers.ctl version should be ', GP%Version
+    write(*,*) 
+    stop
+endif
+read(999,*)
+do 
+    read(999,'(a)',iostat=ios) s
+    if(ios.ne.0) exit
+    read(999,'(a)',iostat=ios) s
+    if(ios.ne.0) exit
+    read(999,'(a)',iostat=ios) s
+    if(ios.ne.0.or.INDEX(s,'Layer Name').eq.0) exit
+    read(s,'(49x,i30)') layerID
+    read(999,'(a)')
+    read(999,'(49x,i30)')   nonlinear
+    read(999,'(49x,i30)')   dispersive
+    read(999,'(49x,i30)')   variableDepth
+    read(999,'(49x,i30)')   breakingWave
+    read(999,'(49x,i30)')   fluxCentered
+    read(999,'(49x,f30.6)') T0
+    read(999,'(49x,f30.6)') dt
+    write(fn1,'(a,i2.2,a)') TRIM(ADJUSTL(GP%BathymetryFilePrefix)),layerID,'.nf'
+    write(fn2,'(a,i2.2,a)') TRIM(ADJUSTL(GP%BathymetryFilePrefix)),layerID,'.xyz'
+    do iLayer = 1,GP%NumLayers
+    if(TRIM(ADJUSTL(LP(iLayer)%BathymetryFileName)).eq.TRIM(ADJUSTL(fn1)).or. &
+        TRIM(ADJUSTL(LP(iLayer)%BathymetryFileName)).eq.TRIM(ADJUSTL(fn2))) then
+        LP(iLayer)%Nonlinearity = nonlinear
+        LP(iLayer)%Dispersion = dispersive
+        LP(iLayer)%DepthVariability = variableDepth
+        LP(iLayer)%Breaking = breakingWave
+        LP(iLayer)%FluxCenter = fluxCentered
+        LP(iLayer)%ComputingStartTime = MAX(T0, PCOMCOT_REAL_ONE*0.0)
+        LP(iLayer)%DTFilterData = dt
+        LP(iLayer)%NDTFilterData = MAX(1, NINT(LP(iLayer)%DTFilterData/GP%dt))
+        exit
+    endif
+    enddo
+enddo
+close(999)
+endif !if:layers.ctl exists 
+        
+HasWrong = 0
+do iLayer = 1,GP%NumLayers
+    pLayer = LP(iLayer)%Parent
+    write(*,'(a,a)',advance='no') '   ', TRIM(ADJUSTL(LP(iLayer)%BathymetryFileName))
+    write(*,'(a,i2,a)',advance='no') ' :   Level: ', LP(iLayer)%Level, '    Parent: '
+    if(pLayer.ge.1) then
+        write(*,'(a11)') TRIM(ADJUSTL(LP(pLayer)%BathymetryFileName))
+    else
+        write(*,*)
+    endif
+    write(*,'(a)',advance='no') '     Governing Equation : '
+    if(LP(iLayer)%Nonlinearity.eq.0) then
+        write(*,'(a)',advance='no') 'linear, '
+    elseif(LP(iLayer)%Nonlinearity.eq.1) then
+        write(*,'(a)',advance='no') 'nonlinear, '
+    endif
+    if(LP(iLayer)%Dispersion.eq.0) then
+        write(*,'(a)',advance='no') 'non-dispersive, '
+    elseif(LP(iLayer)%Dispersion.eq.1) then
+        write(*,'(a)',advance='no') 'dispersive, '
+    endif
+    if(LP(iLayer)%Breaking.eq.0) then
+        write(*,'(a)') 'non-breaking waves'
+    elseif(LP(iLayer)%Breaking.eq.1) then
+        write(*,'(a)') 'breaking waves'
+    endif
+    write(*,'(a)',advance='no') '     Scheme for LSWEs   : '
+    if(LP(iLayer)%FluxCenter.eq.0) then
+        write(*,'(a)',advance='no') 'forward time-centered space (no diffusion)'
+    elseif(LP(iLayer)%FluxCenter.eq.1) then
+        write(*,'(a)',advance='no') 'flux-centered (extra diffusion)'
+    endif
+    
+    write(*,'(a,f7.1)') '    Computation Start Time(seconds): ', LP(iLayer)%ComputingStartTime
+    if(pLayer.ge.1.and.LP(iLayer)%ComputingStartTime.lt.LP(pLayer)%ComputingStartTime) then
+        write(*,*) 'ERROR: '//TRIM(ADJUSTL(LP(iLayer)%BathymetryFileName))// 'starts earliear than its parent layer!'
+        HasWrong = 1
+    endif
+    write(*,*)
+enddo
+    
+if(HasWrong.eq.1) stop
+    
+    
+end subroutine readLayerConfig
+
+
+
+subroutine readBathymetry(GP, LP)
+   
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4       ::  iLayer, i, j, ios, iLayerLevel, iFlag
+real(fp_kind)   ::  x, y, z, xdistance, ydistance
+character(999)  ::  s
+    
+write(*,*)
+write(*,*) "reading bathymetry data ..."
+write(*,'(a)',advance='no') '     '
+    
+do iLayer = 1,GP%NumLayers
+    if(iLayer.ne.1.and.MOD(iLayer-1,5).eq.0) then
+        write(*,*)
+        write(*,'(a)',advance='no') '     '
+    elseif(iLayer.ne.1) then
+        write(*,'(a)',advance='no') ', '
+    endif
+    write(*,'(a11)',advance='no') ADJUSTL(LP(iLayer)%BathymetryFileName)
+    LP(iLayer)%zmax = -2.0E10; LP(iLayer)%zmin = 2.0E10
+    if(LP(iLayer)%BathymetryFileFormat.eq.1) then
+        call readBathymetryNetCDF(GP, LP, iLayer)
+    else
+        open(23,file=TRIM(ADJUSTL(LP(iLayer)%BathymetryFileName)), &
+            status='old',form='formatted',action='read',iostat=ios)
+        do j = 1,LP(iLayer)%NY
+        do i = 1,LP(iLayer)%NX
+            read(23,*) x,y,LP(iLayer)%Z(i,j)
+            LP(iLayer)%zmax = MAX(LP(iLayer)%zmax, LP(iLayer)%Z(i,j))
+            LP(iLayer)%zmin = MIN(LP(iLayer)%zmin, LP(iLayer)%Z(i,j))
+            if((GP%StartEastWest.eq.1).and.(x.lt.0)) x = x+360
+            if((GP%StartEastWest.eq.2).and.(x.gt.180)) x = x-360
+            if(j.eq.1) LP(iLayer)%X(i) = x
+            if(i.eq.1) LP(iLayer)%Y(j) = y
+        enddo
+        enddo
+        close(23)
+    endif
+enddo
+write(*,*)
+    
+do iLayerLevel = 1,GP%NumLayerLevels
+do iLayer = 1,GP%NumLayers
+if(LP(iLayer)%Level.eq.iLayerLevel) then
+    
+    if(iLayerLevel.ge.2) then
+        iFlag = 0
+        do j = 1,LP(iLayer)%NY
+        do i = 1,LP(iLayer)%NX
+            if(LP(iLayer)%Z(i,j).ne.LP(iLayer)%Z(i,j)) then
+                call interpData(GP, LP, LP(iLayer)%Parent, iFlag, LP(iLayer)%X(i), LP(iLayer)%Y(j), z)
+                LP(iLayer)%Z(i,j) = z
+            endif
+        enddo
+        enddo
+    endif
+    
+    do j = 1,LP(iLayer)%NY
+    do i = 1,LP(iLayer)%NX
+        if(LP(iLayer)%Z(i,j).le.-GP%PermanentDryLimit) then
+            call removeNarrowWater(GP, LP, iLayer, i, j)
+        endif
+    enddo
+    enddo
+                
+    write(s,'(a,i2.2,a)') TRIM(ADJUSTL(GP%ResultPath))//'_xcoordinate',iLayer,'.dat'
+    open(23,file=TRIM(ADJUSTL(s)),form='formatted',status='replace')
+    do i = 1,LP(iLayer)%NX
+        write(23,'(f15.5)',advance='no') LP(iLayer)%X(i)
+    enddo
+    close(23)
+    write(s,'(a,i2.2,a)') TRIM(ADJUSTL(GP%ResultPath))//'_ycoordinate',iLayer,'.dat'
+    open(23,file=TRIM(ADJUSTL(s)),form='formatted',status='replace')
+    do j = 1,LP(iLayer)%NY
+        write(23,'(f15.5)',advance='no') LP(iLayer)%Y(j)
+    enddo
+    close(23)
+    write(s,'(a,i2.2,a)') TRIM(ADJUSTL(GP%ResultPath))//'_bathymetry',iLayer,'.dat'
+    open(23,file=TRIM(ADJUSTL(s)),form='unformatted',status='replace')
+    write(23) fp_kind !indicate the floating-point precision used in binary files
+    write(23) LP(iLayer)%NX, LP(iLayer)%NY
+    do j = 1,LP(iLayer)%NY
+        write(23) (LP(iLayer)%Z(i,j), i=1,LP(iLayer)%NX)
+    enddo
+    close(23)
+          
+endif
+enddo
+enddo
+write(*,*)
+    
+end subroutine readBathymetry
+
+
+
+recursive subroutine removeNarrowWater(GP, LP, iLayer, m, n)
+      
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4   ::  iLayer, m, n, i, j
+
+if(m.le.GP%nRowBathymetryBoundary) then
+    do i = m-1,1,-1
+        if(LP(iLayer)%Z(i,n).gt.-GP%PermanentDryLimit) then
+            LP(iLayer)%Z(i,n) = -GP%PermanentDryLimit
+            call removeNarrowWater(GP, LP, iLayer, i, n)
+        endif
+    enddo
+endif
+if(m.ge.LP(iLayer)%NX-GP%nRowBathymetryBoundary+1) then
+    do i = m+1,LP(iLayer)%NX
+        if(LP(iLayer)%Z(i,n).gt.-GP%PermanentDryLimit) then
+            LP(iLayer)%Z(i,n) = -GP%PermanentDryLimit
+            call removeNarrowWater(GP, LP, iLayer, i, n)
+        endif
+    enddo
+endif
+if(n.le.GP%nRowBathymetryBoundary) then
+    do i = n-1,1,-1
+        if(LP(iLayer)%Z(m,i).gt.-GP%PermanentDryLimit) then
+            LP(iLayer)%Z(m,i) = -GP%PermanentDryLimit
+            call removeNarrowWater(GP, LP, iLayer, m, i)
+        endif
+    enddo
+endif
+if(n.ge.LP(iLayer)%NY-GP%nRowBathymetryBoundary+1) then
+    do i = n+1,LP(iLayer)%NY
+        if(LP(iLayer)%Z(m,i).gt.-GP%PermanentDryLimit) then
+            LP(iLayer)%Z(m,i) = -GP%PermanentDryLimit
+            call removeNarrowWater(GP, LP, iLayer, m, i)
+        endif
+    enddo
+endif
+if(m.ge.GP%nRowBathymetryBoundary+1) then
+    do i = m-1,m-GP%nRowBathymetry,-1
+        if(LP(iLayer)%Z(i,n).le.-GP%PermanentDryLimit) then
+            do j = m-1,i+1,-1
+                if(LP(iLayer)%Z(j,n).gt.-GP%PermanentDryLimit) then
+                    LP(iLayer)%Z(j,n) = -GP%PermanentDryLimit
+                    call removeNarrowWater(GP, LP, iLayer, j, n)
+                endif
+            enddo
+        endif
+    enddo
+endif
+if(m.le.LP(iLayer)%NX-GP%nRowBathymetryBoundary) then
+    do i = m+1,m+GP%nRowBathymetry
+        if(LP(iLayer)%Z(i,n).le.-GP%PermanentDryLimit) then
+            do j = m+1,i-1
+                if(LP(iLayer)%Z(j,n).gt.-GP%PermanentDryLimit) then
+                    LP(iLayer)%Z(j,n) = -GP%PermanentDryLimit
+                    call removeNarrowWater(GP, LP, iLayer, j, n)
+                endif
+            enddo
+         endif
+    enddo
+endif
+if(n.ge.GP%nRowBathymetryBoundary+1) then
+    do i = n-1,n-GP%nRowBathymetry,-1
+        if(LP(iLayer)%Z(m,i).le.-GP%PermanentDryLimit) then
+            do j = n-1,i+1,-1
+                if(LP(iLayer)%Z(m,j).gt.-GP%PermanentDryLimit) then
+                    LP(iLayer)%Z(m,j) = -GP%PermanentDryLimit
+                    call removeNarrowWater(GP, LP, iLayer, m, j)
+                endif
+            enddo
+        endif
+    enddo
+endif
+if(n.le.LP(iLayer)%NY-GP%nRowBathymetryBoundary) then
+    do i = n+1,n+GP%nRowBathymetry
+        if(LP(iLayer)%Z(m,i).le.-GP%PermanentDryLimit) then
+            do j = n+1,i-1
+                if(LP(iLayer)%Z(m,j).gt.-GP%PermanentDryLimit) then
+                    LP(iLayer)%Z(m,j) = -GP%PermanentDryLimit
+                    call removeNarrowWater(GP, LP, iLayer, m, j)
+                endif
+            enddo
+        endif
+    enddo
+endif
+
+end subroutine removeNarrowWater
+
+
+
+subroutine cflCheck(GP, LP)
+      
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4       ::  iLayer, i, j
+real(fp_kind)   ::  zmax, dmin, cr
+    
+write(*,*)
+write(*,*) 'check CFL and determine dt for each layer ...'
+zmax = LP(GP%TopLayer)%zmax
+if(GP%CoordinatesType.eq.0) then !spehrical coordinate
+    dmin = MIN(COS(LP(GP%TopLayer)%ymin*GP%PI/180.0),COS(LP(GP%TopLayer)%ymax*GP%PI/180.0))*GP%R_EARTH
+    dmin = MIN(GP%R_EARTH*LP(GP%TopLayer)%dy, dmin*LP(GP%TopLayer)%dx)*GP%PI/180.0
+else
+    dmin = MIN(LP(GP%TopLayer)%dx, LP(GP%TopLayer)%dy)
+endif
+cr = GP%dt*SQRT(GP%GRAV*zmax)/dmin
+write(*,*)
+write(*,'(a,f6.3)',advance='no') '     CFL number:',cr
+write(*,*) '  for linear shallow water equations ...'
+if(cr.gt.0.5) then
+    write(*,*) "WARNING: CFL number is greater than 0.5."
+endif
+write(*,'(a)')                   "     determine dt for each layer according to cfl number:"
+write(*,*)
+do iLayer = 1,GP%NumLayers
+    if(iLayer.eq.GP%TopLayer) then
+        LP(iLayer)%dt = GP%dt
+        LP(iLayer)%nStepsPerTimeStep = 1
+    else
+        zmax = LP(iLayer)%zmax
+        if(GP%CoordinatesType.eq.0) then !spehrical coordinate
+            dmin = MIN(COS(LP(iLayer)%ymin*GP%PI/180.0),COS(LP(iLayer)%ymax*GP%PI/180.0))*GP%R_EARTH
+            dmin = MIN(GP%R_EARTH*LP(iLayer)%dy, dmin*LP(iLayer)%dx)*GP%PI/180.0
+        else
+            dmin = MIN(LP(iLayer)%dx, LP(iLayer)%dy)
+        endif
+        LP(iLayer)%dt = cr*dmin/SQRT(GP%GRAV*zmax)
+        i = 1
+        do
+            if(LP(iLayer)%dt*i.ge.GP%dt.or.ABS(LP(iLayer)%dt*i-GP%dt).lt.GP%dt*1.0E-4) then
+                LP(iLayer)%nStepsPerTimeStep = i
+                LP(iLayer)%dt = GP%dt/i
+                exit
+            endif
+            i = i + 1
+        enddo
+    endif
+    write(*,'(a,a11,a,f7.4)') '     ',ADJUSTL(LP(iLayer)%BathymetryFileName),':  dt = ',LP(iLayer)%dt
+enddo
+write(*,*)
+    
+end subroutine cflCheck
+
+
+
+subroutine readStations(GP, LP, SP)
+      
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)      ::  GP
+type(HostLayerParameters)       ::  LP(99)
+type(HostStationParameters)     ::  SP(999)
+character(999)  ::  s
+integer*4       ::  i, i0, j, ios
+real(fp_kind)   ::  x, y
+    
+write(*,*) 'reading location of stations from file ', &
+    TRIM(ADJUSTL(GP%StationFileName)),' ...'
+open(23,file=TRIM(ADJUSTL(GP%StationFileName)),status='old',form='formatted',action='read',iostat=ios)
+i = 0; i0 = 0
+do
+    read(23,'(a)',iostat=ios) s
+    if(ios.ne.0) exit
+    if(LEN(TRIM(ADJUSTL(s))).eq.0) exit
+    i = i + 1
+    read(s,*) x,y
+    if((GP%StartEastWest.eq.1).and.(x.lt.0.0)) x=x+360.0
+    if((GP%StartEastWest.eq.2).and.(x.gt.180.0)) x=x-360.0
+    if((x.ge.LP(GP%TopLayer)%xmin+LP(GP%TopLayer)%dx).and. &
+        (x.le.LP(GP%TopLayer)%xmax-LP(GP%TopLayer)%dx).and. &
+        (y.ge.LP(GP%TopLayer)%ymin+LP(GP%TopLayer)%dy).and. &
+        (y.le.LP(GP%TopLayer)%ymax-LP(GP%TopLayer)%dy)) then
+        i0 = i0 + 1
+        SP(i0)%X = x; SP(i0)%Y = y
+    else
+        if(i0.eq.i-1)  write(*,'(a)',advance='no') "     Station(s) not in computing domain: #"
+        write(*,'(i4)',advance='no') i
+    endif
+enddo
+close(23)
+if(i0.ne.GP%NumStations) then
+    write(*,*)
+    GP%NumStations = i0
+endif
+do i = 1,GP%NumStations
+    SP(i)%nLayer = 0
+    do j = 1,GP%NumLayers
+        if(SP(i)%X.ge.LP(j)%xmin.and.SP(i)%X.le.LP(j)%xmax.and.  &
+            SP(i)%Y.ge.LP(j)%ymin.and.SP(i)%Y.le.LP(j)%ymax) then
+            if(SP(i)%nLayer.eq.0) then
+                SP(i)%nLayer = j
+            elseif(LP(j)%Level.gt.LP(SP(i)%nLayer)%Level) then
+                SP(i)%nLayer = j
+            endif
+        endif
+    enddo
+    write(*,'(a,i3,a,f12.4,a,f12.4,a,i3)')  &
+        '     station ',i,':    x:',SP(i)%x,',    y:',SP(i)%y,',    layer:',SP(i)%nLayer
+enddo
+write(*,*)
+    
+end subroutine readStations
+
+
+
+subroutine readFaultParameters(GP, FP)
+    
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)      ::  GP
+type(FaultParameters), managed  ::  FP(4000)
+integer*4       ::  i, j, k, ios
+character(999)  ::  s
+    
+write(*,*) 'reading fault parameters from file: ', &
+    TRIM(ADJUSTL(GP%FaultParametersFileName)), ' ...'
+open(23,file=TRIM(ADJUSTL(GP%FaultParametersFileName)), &
+    status='old',form='formatted',action='read',iostat=ios)
+read(23, '(3/)')
+i = 1
+do
+    read(23, '(a)', iostat=ios) s
+    if(ios.ne.0) exit
+    read(23, '(a)', iostat=ios) s
+    if(ios.ne.0) exit
+    read(23, '(a)', iostat=ios) s
+    if(ios.ne.0) exit
+    if(INDEX(s,'Parameters for Fault Segment').eq.0) exit
+    read(23, '(a)', iostat=ios) s
+    read(23, '(49x,f30.6)') FP(i)%T0
+    if(FP(i)%T0.lt.0.0.or.FP(i)%T0.gt.GP%TotalTime) then
+        FP(i)%NT = -1
+    else
+        FP(i)%NT = NINT(FP(i)%T0/GP%dt)
+    endif
+    read(23, '(49x,f30.6)') FP(i)%Depth
+    read(23, '(49x,f30.6)') FP(i)%Length
+    read(23, '(49x,f30.6)') FP(i)%Width
+    read(23, '(49x,f30.6)') FP(i)%Slip
+    read(23, '(49x,f30.6)') FP(i)%Rake
+    read(23, '(49x,f30.6)') FP(i)%Strike
+    read(23, '(49x,f30.6)') FP(i)%Dip
+    read(23, '(49x,f30.6)') FP(i)%Y0
+    read(23, '(49x,f30.6)') FP(i)%X0
+    if(GP%StartEastWest.eq.1.and.FP(i)%X0.lt.0.0) FP(i)%X0 = FP(i)%X0+360.0
+    if(GP%StartEastWest.eq.2.and.FP(i)%X0.gt.180.0) FP(i)%X0 = FP(i)%X0-360.0
+    i = i + 1
+enddo
+GP%NumFaults = i-1
+close(23)
+write(*,'(a,i4,a)') '     There are ',GP%NumFaults,'  fault segments.'
+write(*,*)
+    
+end subroutine readFaultParameters
+
+
+
+subroutine computeParentChildSendRecv(GP, LP)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4       ::  nCBoundary, iLayer, pLayer
+integer*4       ::  nstartx, nendx, nstarty, nendy
+integer*4       ::  istart, iend, jstart, jend  
+integer*4       ::  iCnt, iBoundary, iHMN, i, j
+real(fp_kind)   ::  x, y
+
+write(*,*) "preparing the send-receive table between parent and child layers ..."
+write(*,*)
+
+nCBoundary = GP%nGHOST + 1
+
+!/// determine the boundary grids of child layers ///!
+do iLayer = 1,GP%NumLayers
+if(LP(iLayer)%Level.gt.1) then ! this layer needs to get boundary value from parent
+    iCnt = 0
+    do iBoundary = 1,4  !1/2/3/4 --> left/right/bottom/top
+        if(iBoundary.eq.1) then !left boundary
+            nstartx = 1 
+            nendx   = nCBoundary
+            nstarty = 1
+            nendy   = LP(iLayer)%NY
+        elseif(iBoundary.eq.2) then !right boundary
+            nstartx = LP(iLayer)%NX-nCBoundary+1
+            nendx   = LP(iLayer)%NX
+            nstarty = 1
+            nendy   = LP(iLayer)%NY
+        elseif(iBoundary.eq.3) then !bottom boundary
+            nstartx = 1
+            nendx   = LP(iLayer)%NX
+            nstarty = 1
+            nendy   = nCBoundary
+        elseif(iBoundary.eq.4) then !top boundary
+            nstartx = 1
+            nendx   = LP(iLayer)%NX
+            nstarty = LP(iLayer)%NY-nCBoundary+1
+            nendy   = LP(iLayer)%NY
+        endif
+        do iHMN = 1,3  !1/2/3 --> H/M/N
+            iCnt = iCnt + 1
+            istart = nstartx; iend = nendx
+            jstart = nstarty; jend = nendy
+            if(iHMN.eq.2) iend = iend-1
+            if(iHMN.eq.3) jend = jend-1
+            LP(iLayer)%RecvFromParent(iCnt,1) = iBoundary
+            LP(iLayer)%RecvFromParent(iCnt,2) = iHMN
+            LP(iLayer)%RecvFromParent(iCnt,3) = istart
+            LP(iLayer)%RecvFromParent(iCnt,4) = iend
+            LP(iLayer)%RecvFromParent(iCnt,5) = jstart
+            LP(iLayer)%RecvFromParent(iCnt,6) = jend
+        enddo !loop for H/M/N
+    enddo !loop for left/right/bottom/top
+endif
+enddo
+
+!/// determine the grid points of parent layers for feedback ///!
+do iLayer = 1,GP%NumLayers
+if(LP(iLayer)%Level.gt.1) then ! this layer needs to send H to parent
+    pLayer  = LP(iLayer)%Parent
+    nstartx = LP(pLayer)%NX; nendx = -1
+    nstarty = LP(pLayer)%NY; nendy = -1
+    do i = 1,LP(pLayer)%NX
+        x = LP(pLayer)%X(i)
+        if(x.ge.LP(iLayer)%xmin+nCBoundary*LP(iLayer)%dx.and. &
+           x.le.LP(iLayer)%xmax-nCBoundary*LP(iLayer)%dx) then
+            nstartx = MIN(nstartx,i); nendx = MAX(nendx,i)
+        endif
+    enddo
+    do j = 1,LP(pLayer)%NY
+        y = LP(pLayer)%Y(j)
+        if(y.ge.LP(iLayer)%ymin+nCBoundary*LP(iLayer)%dy.and. &
+           y.le.LP(iLayer)%ymax-nCBoundary*LP(iLayer)%dy) then
+            nstarty = MIN(nstarty,j); nendy = MAX(nendy,j)
+        endif
+    enddo
+    LP(iLayer)%SendToParent(1) = nstartx
+    LP(iLayer)%SendToParent(2) = nendx
+    LP(iLayer)%SendToParent(3) = nstarty
+    LP(iLayer)%SendToParent(4) = nendy
+endif
+enddo
+
+end subroutine computeParentChildSendRecv
+
+
+
+subroutine computeGlobalParameters(GP)
+      
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+    
+write(*,*) 'computing global paramters ...'
+write(*,*)
+    
+GP%TotalTimeSteps = MAX(1,NINT(GP%TotalTime/GP%dt))
+GP%NDTSaveData    = MAX(1,NINT(GP%DTSaveData/GP%dt))
+          
+GP%nCalculations = 1
+if(GP%PurposeCalculation.eq.2) then
+    GP%nCalculations = GP%NumFaults
+elseif(GP%PurposeCalculation.eq.3) then
+    if(GP%CoordinatesType.eq.0) then
+        if((GP%StartEastWest.eq.1).and.(GP%SourceStartX.lt.0)) &
+            GP%SourceStartX = GP%SourceStartX+360
+        if((GP%StartEastWest.eq.2).and.(GP%SourceStartX.gt.180)) &
+            GP%SourceStartX = GP%SourceStartX-360
+        if((GP%StartEastWest.eq.1).and.(GP%SourceEndX.lt.0)) &
+            GP%SourceEndX = GP%SourceEndX+360
+        if((GP%StartEastWest.eq.2).and.(GP%SourceEndX.gt.180)) &
+            GP%SourceEndX = GP%SourceEndX-360
+        GP%SourceDX = GP%SourceDX/(GP%R_EARTH*COS(0.5*(GP%SourceStartY+GP%SourceEndY)*GP%PI/180.0))*180.0/GP%PI
+        GP%SourceDY = GP%SourceDY/GP%R_EARTH*180.0/GP%PI
+    endif
+    GP%SourceNX = NINT((GP%SourceEndX-GP%SourceStartX)/GP%SourceDX)
+    GP%SourceNY = NINT((GP%SourceEndY-GP%SourceStartY)/GP%SourceDY)
+    GP%nCalculations = GP%SourceNX*GP%SourceNY
+endif
+          
+end subroutine computeGlobalParameters
+
+
+
+subroutine sendCommonInfoToDevice(GPH, GPD, LPH, LPD, SPH, SPD)
+
+use cudafor
+use VariableDefination
+
+type(HostGlobalParameters)              ::  GPH
+type(DeviceGlobalParameters), managed   ::  GPD
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+type(HostStationParameters)             ::  SPH(999)
+type(DeviceStationParameters), managed  ::  SPD(999)
+integer*4   ::  iLayer, iSta
+
+write(*,*) 'sending common info from CPU to GPU ...'
+write(*,*)
+
+!**** send global parameters from host to device ****!
+!/// basic control parameters ///!
+GPD%PurposeCalculation    = GPH%PurposeCalculation
+GPD%InitialConditionType  = GPH%InitialConditionType
+GPD%CoordinatesType       = GPH%CoordinatesType 
+GPD%TotalTime             = GPH%TotalTime  
+GPD%dt                    = GPH%dt 
+GPD%DTSaveData            = GPH%DTSaveData 
+GPD%SaveFlux              = GPH%SaveFlux
+GPD%SaveDynamicPressure   = GPH%SaveDynamicPressure
+GPD%MinGridsPerNode       = GPH%MinGridsPerNode
+GPD%FeedbackToParentLayer = GPH%FeedbackToParentLayer
+!/// parameters for tsunami source ///!
+GPD%HorizontalMotion = GPH%HorizontalMotion
+GPD%KajiuraFilter    = GPH%KajiuraFilter
+GPD%UseAverageDepth  = GPH%UseAverageDepth
+GPD%MinKajiuraDepth  = GPH%MinKajiuraDepth
+GPD%MaxBottomSlope   = GPH%MaxBottomSlope
+!/// parameters for waves ///!
+GPD%Nonlinearity       = GPH%Nonlinearity
+GPD%Dispersion         = GPH%Dispersion
+GPD%DepthVariability   = GPH%DepthVariability
+GPD%MinDispersionDepth = GPH%MinDispersionDepth
+GPD%Breaking           = GPH%Breaking
+GPD%FluxCenter         = GPH%FluxCenter 
+GPD%centerWeighting0   = GPH%centerWeighting0
+GPD%FrCap              = GPH%FrCap
+!/// parameters for boundary condition ///!
+GPD%BoundaryConditionType = GPH%BoundaryConditionType
+GPD%SpongeWidthX          = GPH%SpongeWidthX
+GPD%SpongeWidthY          = GPH%SpongeWidthY
+GPD%MaxSpongeMANNING      = GPH%MaxSpongeMANNING 
+GPD%SpongeDampingA        = GPH%SpongeDampingA
+GPD%SpongeDampingR        = GPH%SpongeDampingR
+!/// parameters for inundation ///!
+GPD%PermanentDryLimit  = GPH%PermanentDryLimit
+GPD%MinWaterDepth      = GPH%MinWaterDepth
+GPD%FrictionDepthLimit = GPH%FrictionDepthLimit
+GPD%MANNING            = GPH%MANNING
+!/// parameters for Green functions ///!
+GPD%SourceStartX = GPH%SourceStartX; GPD%SourceEndX = GPH%SourceEndX; GPD%SourceDX = GPH%SourceDX
+GPD%SourceStartY = GPH%SourceStartY; GPD%SourceEndY = GPH%SourceEndY; GPD%SourceDY = GPH%SourceDY
+GPD%SourceBasisFunctionType = GPH%SourceBasisFunctionType 
+GPD%GaussianRatio           = GPH%GaussianRatio
+GPD%SigmoidCoefficient      = GPH%SigmoidCoefficient
+!/// parameters for nested layers ///!
+GPD%NumStations    = GPH%NumStations
+GPD%NumLayers      = GPH%NumLayers
+GPD%NumLayerLevels = GPH%NumLayerLevels
+GPD%TopLayer       = GPH%TopLayer
+!/// default parameters ///!
+GPD%nGHOST  = GPH%nGHOST
+GPD%GRAV    = GPH%GRAV
+GPD%PI      = GPH%PI
+GPD%R_EARTH = GPH%R_EARTH
+GPD%OMEGA   = GPH%OMEGA
+!/// execution configuration ///!
+GPD%BlockDimX = GPH%BlockDimX
+GPD%BlockDimY = GPH%BlockDimY
+
+!**** send layer parameters from host to device ****!
+do iLayer = 1,GPH%NumLayers
+    !///parameters for bathymetry///!
+    LPD(iLayer)%Level  = LPH(iLayer)%Level
+    LPD(iLayer)%Parent = LPH(iLayer)%Parent
+    LPD(iLayer)%xmin   = LPH(iLayer)%xmin
+    LPD(iLayer)%xmax   = LPH(iLayer)%xmax
+    LPD(iLayer)%dx     = LPH(iLayer)%dx   
+    LPD(iLayer)%ymin   = LPH(iLayer)%ymin
+    LPD(iLayer)%ymax   = LPH(iLayer)%ymax
+    LPD(iLayer)%dy     = LPH(iLayer)%dy    
+    LPD(iLayer)%zmin   = LPH(iLayer)%zmin
+    LPD(iLayer)%zmax   = LPH(iLayer)%zmax 
+    LPD(iLayer)%NX     = LPH(iLayer)%NX
+    LPD(iLayer)%NY     = LPH(iLayer)%NY
+    !///parameters for computation///!
+    LPD(iLayer)%Nonlinearity       = LPH(iLayer)%Nonlinearity
+    LPD(iLayer)%Dispersion         = LPH(iLayer)%Dispersion
+    LPD(iLayer)%DepthVariability   = LPH(iLayer)%DepthVariability
+    LPD(iLayer)%Breaking           = LPH(iLayer)%Breaking
+    LPD(iLayer)%FluxCenter         = LPH(iLayer)%FluxCenter
+    LPD(iLayer)%NDTFilterData      = LPH(iLayer)%NDTFilterData
+    LPD(iLayer)%DTFilterData       = LPH(iLayer)%DTFilterData
+    LPD(iLayer)%ComputingStartTime = LPH(iLayer)%ComputingStartTime
+    LPD(iLayer)%dt                 = LPH(iLayer)%dt
+    LPD(iLayer)%nStepsPerTimeStep  = LPH(iLayer)%nStepsPerTimeStep
+enddo
+
+!**** send station parameters from host to device ****!
+do iSta = 1,GPH%NumStations
+    SPD(iSta)%X      = SPH(iSta)%X
+    SPD(iSta)%Y      = SPH(iSta)%Y
+    SPD(iSta)%nLayer = SPH(iSta)%nLayer
+enddo
+
+end subroutine sendCommonInfoToDevice
+
+
+
+subroutine allocateDeviceMemory(GP, LPH, LPD, SPH, SPD)
+
+use cudafor
+use VariableDefination
+use pcomcotLIB_kernels
+implicit NONE  
+type(HostGlobalParameters)              ::  GP
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+type(HostStationParameters)             ::  SPH(999)
+type(DeviceStationParameters), managed  ::  SPD(999)
+integer*4       ::  iLayer, iSta, ierror, status
+integer*4       ::  m, nnz
+integer*8       ::  bufferSize, bufferSizeMax
+real*4          ::  usedMem_real, totalMem_real, usedRatio
+character(10)   ::  memUnit
+type(dim3)      ::  grid, tBlock
+integer(CUDA_COUNT_KIND)    ::  freeMem, totalMem
+
+
+
+write(*,*) "allocating variables in GPU global memory ..."
+
+!/// allocate layer arrays on host ///!
+do iLayer = 1,GP%NumLayers
+    ALLOCATE(LPH(iLayer)%H(2,LPH(iLayer)%NX,LPH(iLayer)%NY))
+    ALLOCATE(LPH(iLayer)%M(2,LPH(iLayer)%NX-1,LPH(iLayer)%NY))
+    ALLOCATE(LPH(iLayer)%N(2,LPH(iLayer)%NX,LPH(iLayer)%NY-1))
+    ALLOCATE(LPH(iLayer)%Hmax(LPH(iLayer)%NX,LPH(iLayer)%NY))
+    ALLOCATE(LPH(iLayer)%Hmin(LPH(iLayer)%NX,LPH(iLayer)%NY))
+    if(LPH(iLayer)%Dispersion.eq.1) then
+        ALLOCATE(LPH(iLayer)%Q(LPH(iLayer)%NX,LPH(iLayer)%NY))
+        ALLOCATE(LPH(iLayer)%PL(LPH(iLayer)%NX,LPH(iLayer)%NY))
+        ALLOCATE(LPH(iLayer)%PR(LPH(iLayer)%NX,LPH(iLayer)%NY))
+        ALLOCATE(LPH(iLayer)%PB(LPH(iLayer)%NX,LPH(iLayer)%NY))
+        ALLOCATE(LPH(iLayer)%PT(LPH(iLayer)%NX,LPH(iLayer)%NY))
+        ALLOCATE(LPH(iLayer)%PC(LPH(iLayer)%NX,LPH(iLayer)%NY))
+        ALLOCATE(LPH(iLayer)%PQ(LPH(iLayer)%NX,LPH(iLayer)%NY))
+    endif
+enddo
+
+!/// allocate layer arrays on device ///!
+do iLayer = 1,GP%NumLayers
+    ALLOCATE(LPD(iLayer)%X(LPD(iLayer)%NX))
+    ALLOCATE(LPD(iLayer)%Y(LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%Z(LPD(iLayer)%NX,LPD(iLayer)%NY))
+
+    ALLOCATE(LPD(iLayer)%H(2,LPD(iLayer)%NX,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%M(2,LPD(iLayer)%NX-1,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%N(2,LPD(iLayer)%NX,LPD(iLayer)%NY-1))
+    ALLOCATE(LPD(iLayer)%D_M(LPD(iLayer)%NX-1,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%D_N(LPD(iLayer)%NX,LPD(iLayer)%NY-1))
+    ALLOCATE(LPD(iLayer)%Hmax(LPD(iLayer)%NX,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%Hmin(LPD(iLayer)%NX,LPD(iLayer)%NY))
+
+    if(LPD(iLayer)%Level.gt.1) then !these variables are only used by child layers
+        ALLOCATE(LPD(iLayer)%H0(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%HF(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%M0(LPD(iLayer)%NX-1,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%MF(LPD(iLayer)%NX-1,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%N0(LPD(iLayer)%NX,LPD(iLayer)%NY-1))   
+        ALLOCATE(LPD(iLayer)%NF(LPD(iLayer)%NX,LPD(iLayer)%NY-1))
+    endif
+
+    ALLOCATE(LPD(iLayer)%HK(LPD(iLayer)%NX,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%HS(LPD(iLayer)%NX,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%Mtmp(LPD(iLayer)%NX-1,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%Ntmp(LPD(iLayer)%NX,LPD(iLayer)%NY-1))
+    ALLOCATE(LPD(iLayer)%Sign_M(LPD(iLayer)%NX-1,LPD(iLayer)%NY))
+    ALLOCATE(LPD(iLayer)%Sign_N(LPD(iLayer)%NX,LPD(iLayer)%NY-1))
+
+    if(GP%BoundaryConditionType.eq.2.and.iLayer.eq.GP%TopLayer) then
+        ALLOCATE(LPD(iLayer)%SpongeMANNING(LPD(iLayer)%NX,LPD(iLayer)%NY))
+    endif
+
+    if(GP%CoordinatesType.eq.0) then !spherical coordinates
+        ALLOCATE(LPD(iLayer)%CPX(LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%CPY(LPD(iLayer)%NY-1))
+        ALLOCATE(LPD(iLayer)%CSY(LPD(iLayer)%NY-1))
+        ALLOCATE(LPD(iLayer)%CS1(LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%CS2(LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%CS3(LPD(iLayer)%NY))
+        if(LPD(iLayer)%Nonlinearity.eq.1) then
+            ALLOCATE(LPD(iLayer)%CS6(LPD(iLayer)%NY))
+            ALLOCATE(LPD(iLayer)%CS7(LPD(iLayer)%NY-1))
+            ALLOCATE(LPD(iLayer)%CS8(LPD(iLayer)%NY-1))
+        endif
+    endif
+
+    if(LPD(iLayer)%Dispersion.eq.1) then
+        ALLOCATE(LPD(iLayer)%Q(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        if(LPD(iLayer)%Level.gt.1) then ! only child layers need Q0 and QF
+            ALLOCATE(LPD(iLayer)%Q0(LPD(iLayer)%NX,LPD(iLayer)%NY))
+            ALLOCATE(LPD(iLayer)%QF(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        endif
+        ALLOCATE(LPD(iLayer)%Has_Q(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%WB(2,LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%WS(2,LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PL(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PR(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PB(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PT(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PC(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PQ(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PCA(LPD(iLayer)%NX-1,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%PCB(LPD(iLayer)%NX,LPD(iLayer)%NY-1))
+        if(GP%CoordinatesType.eq.0) then !spherical coordinates
+            ALLOCATE(LPD(iLayer)%CSD1(LPD(iLayer)%NY), LPD(iLayer)%CSD2(LPD(iLayer)%NY))
+            ALLOCATE(LPD(iLayer)%CSD3(LPD(iLayer)%NY), LPD(iLayer)%CSD4(LPD(iLayer)%NY))
+        endif
+
+        !/// allocate memory for vectors and matrix used by Bi-CGSTAB iterations ///!
+        m = LPD(iLayer)%NX*LPD(iLayer)%NY !length of dense vectors
+        nnz = MAX(5*(LPD(iLayer)%NX-2)*(LPD(iLayer)%NY-2),0) + 2*LPD(iLayer)%NX + 2*LPD(iLayer)%NY - 4 !number of non-zero coefficients
+        ALLOCATE(LPD(iLayer)%csrColIndA(nnz), LPD(iLayer)%csrRowPtrA(m+1))
+        ALLOCATE(LPD(iLayer)%csrValA(nnz))
+        ALLOCATE(LPD(iLayer)%vecB(m), LPD(iLayer)%vecX(m), LPD(iLayer)%vecR(m), LPD(iLayer)%vecRC0(m), LPD(iLayer)%vecV(m), &
+                 LPD(iLayer)%vecP(m), LPD(iLayer)%vecS(m), LPD(iLayer)%vecT(m), LPD(iLayer)%vecSC(m), LPD(iLayer)%vecTC(m), &
+                 LPD(iLayer)%vecY(m), LPD(iLayer)%vecZ(m), LPD(iLayer)%vecDInverse(m))
+        !// initialize CSR arrays
+        tBlock = dim3(GP%BlockDimX, GP%BlockDimY, 1)
+        grid = dim3(CEILING(1.0*LPD(iLayer)%NX/tBlock%x), CEILING(1.0*LPD(iLayer)%NY/tBlock%y), 1)
+        call initializeCsrArrays<<<grid,tBlock>>>(LPD, iLayer)
+        ierror = cudaDeviceSynchronize()
+        !// create descriptors of sparse matrix and dense vectors
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecX,  m, LPD(iLayer)%vecX,  CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecR,  m, LPD(iLayer)%vecR,  CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecV,  m, LPD(iLayer)%vecV,  CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecP,  m, LPD(iLayer)%vecP,  CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecS,  m, LPD(iLayer)%vecS,  CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecT,  m, LPD(iLayer)%vecT,  CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecSC, m, LPD(iLayer)%vecSC, CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecTC, m, LPD(iLayer)%vecTC, CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecY,  m, LPD(iLayer)%vecY,  CUDA_R_32F)
+        status = cusparseCreateDnVec(LPD(iLayer)%dnVecZ,  m, LPD(iLayer)%vecZ,  CUDA_R_32F)
+        status = cusparseCreateCsr(LPD(iLayer)%sparseMatA, m, m, nnz, LPD(iLayer)%csrRowPtrA, LPD(iLayer)%csrColIndA, LPD(iLayer)%csrValA, &
+                                   CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ONE, CUDA_R_32F)
+    endif
+
+    if(LPD(iLayer)%Breaking.eq.1) then
+        ALLOCATE(LPD(iLayer)%BrkAge(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%Brkv(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        ALLOCATE(LPD(iLayer)%Brkv_smooth(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        if(LPD(iLayer)%Level.gt.1) then ! only child layers need BrkAge0/F and Brkv0/F
+            ALLOCATE(LPD(iLayer)%BrkAge0(LPD(iLayer)%NX,LPD(iLayer)%NY))
+            ALLOCATE(LPD(iLayer)%BrkAgeF(LPD(iLayer)%NX,LPD(iLayer)%NY))
+            ALLOCATE(LPD(iLayer)%Brkv0(LPD(iLayer)%NX,LPD(iLayer)%NY))
+            ALLOCATE(LPD(iLayer)%BrkvF(LPD(iLayer)%NX,LPD(iLayer)%NY))
+        endif
+        if(GP%CoordinatesType.eq.0) then !spherical coordinates
+            ALLOCATE(LPD(iLayer)%CSB1(LPD(iLayer)%NY),LPD(iLayer)%CSB2(LPD(iLayer)%NY))
+            ALLOCATE(LPD(iLayer)%CSB3(LPD(iLayer)%NY-1),LPD(iLayer)%CSB4(LPD(iLayer)%NY-1))
+        endif
+    endif
+enddo
+
+!/// allocate buffer zone for sparse matrix-dense vector multiplication ///!
+bufferSizeMax = 0
+do iLayer = 1,GP%NumLayers
+    if(LPD(iLayer)%Dispersion.eq.1) then
+        status = cusparseSpMV_buffersize(cusparseH, CUSPARSE_OPERATION_NON_TRANSPOSE, 1.0, LPD(iLayer)%sparseMatA, &
+            LPD(iLayer)%dnVecX, 1.0, LPD(iLayer)%dnVecY, CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG1, bufferSize)
+        bufferSizeMax = MAX(bufferSizeMax, bufferSize)
+    endif
+enddo
+if(bufferSizeMax.gt.0) ALLOCATE(bufferSparseMatrixDenseVector(bufferSizeMax))
+
+!/// allocate station arrays on host ///!
+do iSta = 1,GP%NumStations
+    ALLOCATE(SPH(iSta)%H(GP%TotalTimeSteps+1))
+    if(GP%SaveFlux.eq.1) then
+        ALLOCATE(SPH(iSta)%M(GP%TotalTimeSteps+1))
+        ALLOCATE(SPH(iSta)%N(GP%TotalTimeSteps+1))
+    endif
+    if(GP%SaveDynamicPressure.eq.1.and.LPH(SPH(iSta)%nLayer)%Dispersion.eq.1) then
+        ALLOCATE(SPH(iSta)%Q(GP%TotalTimeSteps+1))
+    endif
+enddo
+
+!/// allocate station arrays on device ///!
+do iSta = 1,GP%NumStations
+    ALLOCATE(SPD(iSta)%H(GP%TotalTimeSteps+1))
+    if(GP%SaveFlux.eq.1) then
+        ALLOCATE(SPD(iSta)%M(GP%TotalTimeSteps+1))
+        ALLOCATE(SPD(iSta)%N(GP%TotalTimeSteps+1))
+    endif
+    if(GP%SaveDynamicPressure.eq.1.and.LPD(SPD(iSta)%nLayer)%Dispersion.eq.1) then
+        ALLOCATE(SPD(iSta)%Q(GP%TotalTimeSteps+1))
+    endif
+enddo
+
+!/// check how much device global memory is used ///!
+ierror = cudaMemGetInfo(freeMem, totalMem)
+usedMem_real = 1.0*(totalMem-freeMem)
+usedRatio = usedMem_real/totalMem
+if(usedMem_real.gt.1024.0**3) then
+    usedMem_real = usedMem_real/(1024.0**3)
+    memUnit = 'GB'
+elseif(usedMem_real.gt.1024.0**2) then
+    usedMem_real = usedMem_real/(1024.0**2)
+    memUnit = 'MB'
+else
+    usedMem_real = usedMem_real/1024.0
+    memUnit = 'KB'
+endif
+totalMem_real = 1.0*totalMem/(1024.0**3)
+write(*,'(f9.1,a,f6.1,a)') usedMem_real, TRIM(ADJUSTL(memUnit))//'  out of ', totalMem_real, 'GB is used.'
+if(usedRatio.ge.0.8) then
+    write(*,*) "ERROR: GPU global memory is not enough for computation!"
+    stop
+endif
+write(*,*)
+
+end subroutine allocateDeviceMemory
+
+
+
+subroutine computeConstantParameters(GP, LP)
+
+use cudafor
+use VariableDefination
+use pcomcotLIB_kernels
+implicit NONE
+type(DeviceGlobalParameters), managed   ::  GP
+type(DeviceLayerParameters), managed    ::  LP(99)
+integer*4   ::  iLayer, Iwidth, Jwidth, iin, jin
+integer*4   ::  i, j, nCnt, ierror
+type(dim3)  ::  grid, tBlock
+
+write(*,*) "computing constant parameters for simulation (e.g., Coriolis, Kajiura's Green function) ..."
+write(*,*)
+
+do iLayer = 1,GP%NumLayers
+    
+    !/// Sponge Damping Coefficients ///!
+    if(GP%BoundaryConditionType.eq.2.and.iLayer.eq.GP%TopLayer) then
+        tBlock = dim3(GP%BlockDimX,GP%BlockDimY,1)
+        grid = dim3(CEILING(1.0*LP(iLayer)%NX/GP%BlockDimX),CEILING(1.0*LP(iLayer)%NY/GP%BlockDimY),1)
+        call calculateSpongeManning<<<grid,tBlock>>>(GP, LP, iLayer)
+        ierror = cudaDeviceSynchronize()
+    endif
+
+    !/// Count Permanent Dry Cells ///!
+    nCnt = 0
+    !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+    do j = 1,LP(iLayer)%NY
+    do i = 1,LP(iLayer)%NX
+        if(LP(iLayer)%Z(i,j).le.-GP%PermanentDryLimit) nCnt = nCnt + 1
+    enddo
+    enddo
+    ierror = cudaDeviceSynchronize()
+    LP(iLayer)%PermanentDryCellsCount = nCnt
+
+    !/// Count Flooding Cells ///!
+    nCnt = 0
+    !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+    do j = 1,LP(iLayer)%NY
+    do i = 1,LP(iLayer)%NX
+        if(LP(iLayer)%Z(i,j).lt.GP%PermanentDryLimit.and.LP(iLayer)%Z(i,j).gt.-GP%PermanentDryLimit) &
+            nCnt = nCnt + 1
+    enddo
+    enddo
+    ierror = cudaDeviceSynchronize()
+    LP(iLayer)%FloodingCellsCount = nCnt
+
+    !/// Coriolis Parameters ///!
+    if(GP%CoordinatesType.eq.0) then
+        !$cuf kernel do <<<*,*>>>
+        do j = 1,LP(iLayer)%NY
+            LP(iLayer)%CPX(j)=2.0*GP%OMEGA*SIN(LP(iLayer)%Y(j)*GP%PI/180.0)*LP(iLayer)%dt
+            if(j.le.LP(iLayer)%NY-1) then
+                LP(iLayer)%CPY(j)=2.0*GP%OMEGA*SIN((LP(iLayer)%Y(j)+0.5*LP(iLayer)%dy)*GP%PI/180.0)*LP(iLayer)%dt
+            endif
+        enddo
+        ierror = cudaDeviceSynchronize()
+    endif
+
+    !/// Mass/Momentum Equations Parameters ///!
+    if(GP%CoordinatesType.eq.1) then
+        LP(iLayer)%CC1 = LP(iLayer)%dt/LP(iLayer)%dx
+        LP(iLayer)%CC2 = LP(iLayer)%dt/LP(iLayer)%dy
+        LP(iLayer)%CC3 = LP(iLayer)%CC1*GP%GRAV
+        LP(iLayer)%CC4 = LP(iLayer)%CC2*GP%GRAV
+    elseif(GP%CoordinatesType.eq.0) then
+        !$cuf kernel do <<<*,*>>>
+        do j = 1,LP(iLayer)%NY
+            LP(iLayer)%CS1(j) = LP(iLayer)%dt/GP%R_EARTH/LP(iLayer)%dx/GP%PI*180.0/COS(LP(iLayer)%Y(j)*GP%PI/180.0)
+            LP(iLayer)%CS2(j) = LP(iLayer)%CS1(j)*LP(iLayer)%dx/LP(iLayer)%dy
+            LP(iLayer)%CS3(j) = LP(iLayer)%CS1(j)*GP%GRAV
+            if(j.le.LP(iLayer)%NY-1) then
+                LP(iLayer)%CSY(j) = COS((LP(iLayer)%Y(j)+0.5*LP(iLayer)%dy)*GP%PI/180.0)
+            endif
+        enddo
+        ierror = cudaDeviceSynchronize()
+        LP(iLayer)%CS4 = LP(iLayer)%dt*GP%GRAV/GP%R_EARTH/LP(iLayer)%dy/GP%PI*180.0
+        LP(iLayer)%CS5 = LP(iLayer)%dt/GP%R_EARTH/LP(iLayer)%dy/GP%PI*180.0
+
+        if(LP(iLayer)%Nonlinearity.eq.1) then    
+            !$cuf kernel do <<<*,*>>>
+            do j = 1,LP(iLayer)%NY
+                LP(iLayer)%CS6(j) = LP(iLayer)%dt*TAN(LP(iLayer)%Y(j)*GP%PI/180.0)/GP%R_EARTH
+                if(j.le.LP(iLayer)%NY-1) then
+                    LP(iLayer)%CS7(j) = LP(iLayer)%dt/GP%R_EARTH/LP(iLayer)%dx/GP%PI*180.0/LP(iLayer)%CSY(j)
+                    LP(iLayer)%CS8(j) = LP(iLayer)%dt*TAN((LP(iLayer)%Y(j)+0.5*LP(iLayer)%dy)*GP%PI/180.0)/GP%R_EARTH
+                endif
+            enddo
+            ierror = cudaDeviceSynchronize()
+        endif
+    endif
+
+    !/// Dispersion Parameters ///!
+    if(LP(iLayer)%Dispersion.eq.1) then
+        if(GP%CoordinatesType.eq.1) then
+            LP(iLayer)%CCD1 = LP(iLayer)%dt/LP(iLayer)%dx**2
+            LP(iLayer)%CCD2 = LP(iLayer)%dt/LP(iLayer)%dy**2
+            LP(iLayer)%CCD3 = 1.0/LP(iLayer)%dx
+            LP(iLayer)%CCD4 = 1.0/LP(iLayer)%dy
+        elseif(GP%CoordinatesType.eq.0) then
+            !$cuf kernel do <<<*,*>>>
+            do j = 1,LP(iLayer)%NY
+                LP(iLayer)%CSD1(j) = LP(iLayer)%dt/ &
+                    (GP%R_EARTH*LP(iLayer)%dx*GP%PI/180.0*COS(LP(iLayer)%Y(j)*GP%PI/180.0))**2
+                LP(iLayer)%CSD2(j) = LP(iLayer)%dt/ &
+                    (GP%R_EARTH*LP(iLayer)%dy*GP%PI/180.0)**2/COS(LP(iLayer)%Y(j)*GP%PI/180.0)
+                LP(iLayer)%CSD3(j) = 1.0/(GP%R_EARTH*LP(iLayer)%dx*GP%PI/180.0*COS(LP(iLayer)%Y(j)*GP%PI/180.0))
+                LP(iLayer)%CSD4(j) = 1.0/(GP%R_EARTH*LP(iLayer)%dy*GP%PI/180.0*COS(LP(iLayer)%Y(j)*GP%PI/180.0))
+            enddo
+            ierror = cudaDeviceSynchronize()
+            LP(iLayer)%CSD5 = 1.0/GP%R_EARTH/LP(iLayer)%dy/GP%PI*180.0
+            LP(iLayer)%CS5  = LP(iLayer)%dt/GP%R_EARTH/LP(iLayer)%dy/GP%PI*180.0    
+        endif
+    endif
+
+    !/// Breaking Parameters ///!
+    if(LP(iLayer)%Breaking.eq.1) then
+        if(GP%CoordinatesType.eq.1) then
+            LP(iLayer)%CCB1 = LP(iLayer)%dt/LP(iLayer)%dx**2
+            LP(iLayer)%CCB2 = LP(iLayer)%dt/LP(iLayer)%dy**2
+        elseif(GP%CoordinatesType.eq.0) then
+            !$cuf kernel do <<<*,*>>>
+            do j = 1,LP(iLayer)%NY
+                LP(iLayer)%CSB1(j) = LP(iLayer)%dt/ &
+                    (GP%R_EARTH*LP(iLayer)%dx*GP%PI/180.0*COS(LP(iLayer)%Y(j)*GP%PI/180.0))**2
+                LP(iLayer)%CSB2(j) = LP(iLayer)%dt/ &
+                    (GP%R_EARTH*LP(iLayer)%dy*GP%PI/180.0)**2/COS(LP(iLayer)%Y(j)*GP%PI/180.0)
+                if(j.le.LP(iLayer)%NY-1) then
+                    LP(iLayer)%CSB3(j) = LP(iLayer)%dt/ &
+                        (GP%R_EARTH*LP(iLayer)%dx*GP%PI/180.0*LP(iLayer)%CSY(j))**2
+                    LP(iLayer)%CSB4(j) = LP(iLayer)%dt/ &
+                        (GP%R_EARTH*LP(iLayer)%dy*GP%PI/180.0)**2/LP(iLayer)%CSY(j)
+                endif
+            enddo
+            ierror = cudaDeviceSynchronize()
+        endif
+    endif
+
+enddo
+
+!/// compute Kajiura's Green function ///!
+if(GP%KajiuraFilter.eq.1) then
+    tBlock = dim3(GP%BlockDimX, 1, 1)
+    grid = dim3(CEILING(1.0*kajiuraGreenNInterpPoints/GP%BlockDimX), 1, 1)
+    call computeKajiuraGreen<<<grid,tBlock>>>(kajiuraGreenRmax, kajiuraGreenNInterpPoints)
+    ierror = cudaDeviceSynchronize()
+endif
+
+end subroutine computeConstantParameters
+
+
+
+subroutine removeStationFiles(GP, LP, SP)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+type(HostStationParameters) ::  SP(999)
+integer*4       ::  i
+character(999)  ::  s
+    
+do i = 1,GP%NumStations
+    write(s,'(a,i4.4,a4)') TRIM(ADJUSTL(GP%ResultPath))//'Station',i,'.dat'
+    open(1000+i,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+    write(1000+i) fp_kind !indicate the floating-point precision used in binary files
+    write(1000+i) GP%PurposeCalculation, GP%nCalculations, GP%TotalTimeSteps+1
+    close(1000+i)
+enddo
+if(GP%SaveFlux.eq.1) then
+    do i = 1,GP%NumStations
+        write(s,'(a,i4.4,a6)') TRIM(ADJUSTL(GP%ResultPath))//'Station',i,'_M.dat'
+        open(1000+i,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        write(1000+i) fp_kind
+        write(1000+i) GP%PurposeCalculation, GP%nCalculations, GP%TotalTimeSteps+1
+        close(1000+i)
+    enddo
+    do i = 1,GP%NumStations
+        write(s,'(a,i4.4,a6)') TRIM(ADJUSTL(GP%ResultPath))//'Station',i,'_N.dat'
+        open(1000+i,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        write(1000+i) fp_kind
+        write(1000+i) GP%PurposeCalculation, GP%nCalculations, GP%TotalTimeSteps+1
+        close(1000+i)
+    enddo
+endif
+if(GP%SaveDynamicPressure.eq.1) then
+    do i = 1,GP%NumStations
+        if(LP(SP(i)%nLayer)%Dispersion.eq.1) then
+            write(s,'(a,i4.4,a6)') TRIM(ADJUSTL(GP%ResultPath))//'Station',i,'_Q.dat'
+            open(1000+i,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+            write(1000+i) fp_kind
+            write(1000+i) GP%PurposeCalculation, GP%nCalculations, GP%TotalTimeSteps+1
+            close(1000+i)
+        endif
+    enddo
+endif
+    
+end subroutine removeStationFiles
+
+
+
+subroutine initializeVariables(GP, LPH, LPD)
+
+use cudafor
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)              ::  GP
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+integer*4   ::  iLayer
+
+do iLayer = 1,GP%NumLayers
+    LPD(iLayer)%H = 0.0;    LPH(iLayer)%H = 0.0
+    LPD(iLayer)%M = 0.0;    LPH(iLayer)%M = 0.0 
+    LPD(iLayer)%N = 0.0;    LPH(iLayer)%N = 0.0
+    LPD(iLayer)%Hmax = 0.0; LPH(iLayer)%Hmax = 0.0
+    LPD(iLayer)%Hmin = 0.0; LPH(iLayer)%Hmin = 0.0
+    LPD(iLayer)%HK  = 0.0
+    LPD(iLayer)%D_M = 0.0
+    LPD(iLayer)%D_N = 0.0
+    if(LPH(iLayer)%Dispersion.eq.1) then
+        LPD(iLayer)%Q  = 0.0; LPH(iLayer)%Q = 0.0
+        LPD(iLayer)%WB = 0.0
+        LPD(iLayer)%WS = 0.0
+    endif
+    if(LPH(iLayer)%Breaking.eq.1) then
+        LPD(iLayer)%Brkv   = 0.0
+        LPD(iLayer)%BrkAge = 0.0
+    endif
+enddo
+
+end subroutine initializeVariables
+
+
+
+subroutine getInitialCondition(GPH, GPD, LPH, LPD, FP, iCal, iTimeStep)
+
+use cudafor 
+use VariableDefination
+use pcomcotLIB_kernels
+implicit NONE
+type(HostGlobalParameters)              ::  GPH
+type(DeviceGlobalParameters), managed   ::  GPD
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+type(FaultParameters), managed          ::  FP(4000)
+integer*4       ::  iCal, iTimeStep
+integer*4       ::  iLayer, iLayerLevel, iFault, iHMN
+integer*4       ::  nendx, nendy, i, j, ios, ierror, errorNumbers
+integer*4       ::  nFaultsNow, ix, iy
+real(fp_kind)   ::  x, y, x0, y0, val
+character(999)  ::  fn
+logical         ::  fe
+type(dim3)      ::  grid, tBlock
+
+tBlock = dim3(GPH%BlockDimX,GPH%BlockDimY,1)
+
+
+if(GPH%PurposeCalculation.eq.1.and.GPH%InitialConditionType.eq.0.and.iTimeStep.eq.0) then
+
+!/// read initial H/M/N of the top layer, then interpolate them into child layers ///!
+do iHMN = 1,3 !1/2/3 --> H/M/N  
+    if(iHMN.eq.1) fn = TRIM(ADJUSTL(GPH%InitialElevationFileName))
+    if(iHMN.eq.2) fn = TRIM(ADJUSTL(GPH%InitialMFileName))
+    if(iHMN.eq.3) fn = TRIM(ADJUSTL(GPH%InitialNFileName))
+    if(iHMN.ne.1) then !initial flux is optional
+        inquire(file=TRIM(ADJUSTL(fn)), exist=fe)
+        if(.not.fe) cycle
+    endif
+    if(iHMN.eq.1) then
+        write(*,*) 'reading initial water elevation from file : ',TRIM(ADJUSTL(fn)),' ...'
+    elseif(iHMN.eq.2) then
+        write(*,*) 'reading initial flux component M from file : ',TRIM(ADJUSTL(fn)),' ...'
+        write(*,*) 'ATTENTION: M is defined at (x+0.5dx,y), so its dimension is (NX-1,NY)!'
+    elseif(iHMN.eq.3) then
+        write(*,*) 'reading initial flux component N from file : ',TRIM(ADJUSTL(fn)),' ...'
+        write(*,*) 'ATTENTION: N is defined at (x,y+0.5dy), so its dimension is (NX,NY-1)!'
+    endif
+    write(*,*)
+    !/// read initial files for the top layer ///!
+    if(iHMN.eq.1.and.GPH%InitialElevationFileFormat.eq.1) then
+        call readInitialElevationNetCDF(GPH, LPH)
+    else
+        open(23,file=TRIM(ADJUSTL(fn)),status='old',action='read',form='formatted')
+        if(iHMN.eq.1) then
+            nendx = LPH(GPH%TopLayer)%NX;   nendy = LPH(GPH%TopLayer)%NY
+        elseif(iHMN.eq.2) then
+            nendx = LPH(GPH%TopLayer)%NX-1; nendy = LPH(GPH%TopLayer)%NY
+        elseif(iHMN.eq.3) then
+            nendx = LPH(GPH%TopLayer)%NX;   nendy = LPH(GPH%TopLayer)%NY-1
+        endif
+        do j = 1,nendy
+        do i = 1,nendx
+            read(23,*,iostat=ios) x, y, val
+            if(ios.ne.0) then
+                write(*,*) 'ERROR: something wrong when reading the initial file: ', TRIM(ADJUSTL(fn))
+                stop
+            endif
+            if(iHMN.eq.2.and.ABS(x-LPH(GPH%TopLayer)%X(i)-0.5*LPH(GPH%TopLayer)%dx).gt.0.1*LPH(GPH%TopLayer)%dx) then
+                write(*,*) 'ERROR: coordinates of initial flux are not given properly: ', TRIM(ADJUSTL(fn))
+                stop
+            endif
+            if(iHMN.eq.3.and.ABS(y-LPH(GPH%TopLayer)%Y(j)-0.5*LPH(GPH%TopLayer)%dy).gt.0.1*LPH(GPH%TopLayer)%dy) then
+                write(*,*) 'ERROR: coordinates of initial flux are not given properly: ', TRIM(ADJUSTL(fn))
+                stop
+            endif
+            if(iHMN.eq.1) LPH(GPH%TopLayer)%H(1,i,j) = val
+            if(iHMN.eq.2) LPH(GPH%TopLayer)%M(1,i,j) = val
+            if(iHMN.eq.3) LPH(GPH%TopLayer)%N(1,i,j) = val
+        enddo
+        enddo
+        close(23)
+    endif
+
+    !/// transfer data from host to device ///!
+    if(iHMN.eq.1) LPD(GPD%TopLayer)%H = LPH(GPH%TopLayer)%H
+    if(iHMN.eq.2) LPD(GPD%TopLayer)%M = LPH(GPH%TopLayer)%M
+    if(iHMN.eq.3) LPD(GPD%TopLayer)%N = LPH(GPH%TopLayer)%N
+
+    !///apply Kajiura filter to surface elevation///!
+    if(iHMN.eq.1.and.GPH%KajiuraFilter.eq.1) then
+        !///give H(1,:,:) to HK///!
+        !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+        do j = 1,LPD(GPD%TopLayer)%NY
+        do i = 1,LPD(GPD%TopLayer)%NX
+            LPD(GPD%TopLayer)%HK(i,j) = LPD(GPD%TopLayer)%H(1,i,j)
+        enddo
+        enddo
+        ierror = cudaDeviceSynchronize()
+        !///filter HK ///!
+        call smoothElevation_Kajiura(GPD, LPD, GPD%TopLayer)
+        !///give HK back to H(1,:,:)///!
+        !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+        do j = 1,LPD(GPD%TopLayer)%NY
+        do i = 1,LPD(GPD%TopLayer)%NX
+            LPD(GPD%TopLayer)%H(1,i,j) = LPD(GPD%TopLayer)%HK(i,j) 
+        enddo
+        enddo
+        ierror = cudaDeviceSynchronize()
+    endif
+
+    !/// interpolate initial H/M/N into all layers, then modify them acoording to local bathymetry ///!
+    do iLayerLevel = 1,GPD%NumLayerLevels
+    do iLayer = 1,GPD%NumLayers
+    if(LPD(iLayer)%Level.eq.iLayerLevel) then
+        grid = dim3(CEILING(1.0*LPD(iLayer)%NX/tBlock%x),CEILING(1.0*LPD(iLayer)%NY/tBlock%y),1)
+        if(iHMN.eq.1) then
+            call getInitialElevationThisLayer<<<grid,tBlock>>>(GPD, LPD, iLayer)
+        elseif(iHMN.eq.2) then
+            call getInitialMThisLayer<<<grid,tBlock>>>(GPD, LPD, iLayer)
+        elseif(iHMN.eq.3) then
+            call getInitialNThisLayer<<<grid,tBlock>>>(GPD, LPD, iLayer)
+        endif   
+    endif
+    enddo
+    enddo
+    ierror = cudaDeviceSynchronize()
+
+enddo !loop for H/M/N
+endif !if initial elevation and flux are given
+
+if(GPH%PurposeCalculation.eq.1.and.GPH%InitialConditionType.eq.1.or.GPH%PurposeCalculation.eq.2) then
+    !/// check if there is fault at this moment ///!
+    nFaultsNow = 0
+    do iFault = 1,GPH%NumFaults
+        if((GPH%PurposeCalculation.eq.1.and.FP(iFault)%NT.eq.iTimeStep.and.ABS(FP(iFault)%Slip).gt.1.0E-5).or. &
+            GPH%PurposeCalculation.eq.2.and.iTimeStep.eq.0.and.iFault.eq.iCal) then
+            nFaultsNow = nFaultsNow + 1
+        endif
+    enddo
+    if(nFaultsNow.eq.0) return
+    !/// calculate seafloor elevation of the top layer ///!
+    nFaultsNow = 0 
+    LPD(GPD%TopLayer)%HK = 0.0
+    grid = dim3(CEILING(1.0*LPD(GPD%TopLayer)%NX/tBlock%x),CEILING(1.0*LPD(GPD%TopLayer)%NY/tBlock%y),1) 
+    do iFault = 1,GPH%NumFaults
+        if((GPH%PurposeCalculation.eq.1.and.FP(iFault)%NT.eq.iTimeStep.and.ABS(FP(iFault)%Slip).gt.1.0E-5).or. &
+           (GPH%PurposeCalculation.eq.2.and.iTimeStep.eq.0.and.iFault.eq.iCal)) then
+            nFaultsNow = nFaultsNow + 1
+            if(iTimeStep.ne.0.and.nFaultsNow.eq.1) then
+                write(*,*)
+                write(*,*) "-------------------------- New Tsunami Source --------------------------"
+            endif
+            write(*,'(2(a,i5))') ' calculating water elevation from Okada''s model: subfault ', iFault, '  of', GPH%NumFaults
+            call calculateElevationOkada<<<grid,tBlock>>>(GPD, LPD, FP, GPD%TopLayer, iFault)
+            ierror = cudaDeviceSynchronize()
+        endif
+    enddo
+    !// check if OKADA model gives NaN or Infinity due to singularity //!
+    errorNumbers = 0
+    !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+    do j = 1,LPD(GPD%TopLayer)%NY
+    do i = 1,LPD(GPD%TopLayer)%NX
+        if(LPD(GPD%TopLayer)%HK(i,j).ne.LPD(GPD%TopLayer)%HK(i,j).or.ABS(LPD(GPD%TopLayer)%HK(i,j)).gt.HUGE(val)) errorNumbers = errorNumbers + 1
+    enddo
+    enddo
+    ierror = cudaDeviceSynchronize()
+    if(errorNumbers.gt.0) then
+        write(*,*)
+        write(*,*) "ERROR: OKADA model gives Inf or NaN, probably because the updip edges of some faults are too shallow!"
+        stop
+    endif
+
+    !/// smooth seafloor elevation with Kajiura filer ///!
+    if(GPH%KajiuraFilter.eq.1) call smoothElevation_Kajiura(GPD, LPD, GPD%TopLayer)
+
+    !/// interpolate seafloor elevation into child layers, then suprimpose it on water elevation ///!
+    do iLayerLevel = 1,GPD%NumLayerLevels
+    do iLayer = 1,GPD%NumLayers
+    if(LPD(iLayer)%Level.eq.iLayerLevel) then
+        grid = dim3(CEILING(1.0*LPD(iLayer)%NX/tBlock%x),CEILING(1.0*LPD(iLayer)%NY/tBlock%y),1)
+        call getSurfaceElevationFromBottom<<<grid,tBlock>>>(GPD, LPD, iLayer)
+    endif
+    enddo
+    enddo
+    ierror = cudaDeviceSynchronize()
+
+endif
+
+if(GPH%PurposeCalculation.eq.3.and.iTimeStep.eq.0) then
+
+    ix = MOD(iCal-1,GPH%SourceNX) + 1
+    iy = (iCal-1)/GPH%SourceNX + 1
+    x0 = GPH%SourceStartX + (ix-0.5)*GPH%SourceDX
+    y0 = GPH%SourceStartY + (iy-0.5)*GPH%SourceDY
+
+    if(GPH%SourceBasisFunctionType.eq.1) then
+        write(*,*) "setting up initial water elevation of unit Gaussian shape ..."
+    elseif(GPH%SourceBasisFunctionType.eq.2) then
+        write(*,*) "setting up initial water elevation of approximate Sigmoid function 1/(1+exp(-x)) ..."
+    endif
+    fn = TRIM(ADJUSTL(GPH%ResultPath))//TRIM(ADJUSTL(GPH%GFParamFileName))
+    if(iCal.eq.1) then
+        open(23,file=TRIM(ADJUSTL(fn)),status='replace',form='formatted')
+        write(23,'(a)') 'SourceBasisFunctionType: 1/Gaussian; 2/Sigmoid'
+        write(23,'(a)') 'GaussianRatio, SigmoidCoefficient'
+        write(23,'(a)') 'i  NX  NY  ix  iy  x0  y0  dx dy'
+        write(23,'(i5)') GPH%SourceBasisFunctionType
+        write(23,'(2f16.6)') GPH%GaussianRatio, GPH%SigmoidCoefficient
+    else
+        open(23,file=TRIM(ADJUSTL(fn)),status='old',form='formatted',access='append')
+    endif
+    write(23,'(5i5,4f16.6)') iCal, GPH%SourceNX, GPH%SourceNY, ix, iy, x0, y0, GPH%SourceDX,GPH%SourceDY
+    close(23)
+
+    !/// set initial elevation in each layer ///!
+    do iLayer = 1,GPD%NumLayers
+        grid = dim3(CEILING(1.0*LPD(iLayer)%NX/tBlock%x),CEILING(1.0*LPD(iLayer)%NY/tBlock%y),1)
+        call setUnitInitialElevation<<<grid,tBlock>>>(GPD, LPD, iLayer, x0, y0)   
+    enddo
+    ierror = cudaDeviceSynchronize()
+
+endif
+
+!/// store maximum and minimum elevation of each layer ///!
+do iLayer = 1,GPD%NumLayers
+    !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+    do j = 1,LPD(iLayer)%NY
+    do i = 1,LPD(iLayer)%NX
+        LPD(iLayer)%Hmax(i,j) = MAX(LPD(iLayer)%Hmax(i,j),LPD(iLayer)%H(1,i,j))
+        LPD(iLayer)%Hmin(i,j) = MIN(LPD(iLayer)%Hmin(i,j),LPD(iLayer)%H(1,i,j))
+    enddo
+    enddo
+enddo
+ierror = cudaDeviceSynchronize()
+
+end subroutine getInitialCondition
+
+
+
+subroutine smoothElevation_Kajiura(GP, LP, iLayer)
+
+use cudafor 
+use VariableDefination
+use pcomcotLIB_kernels
+implicit NONE
+type(DeviceGlobalParameters), managed   ::  GP
+type(DeviceLayerParameters), managed    ::  LP(99)
+integer*4, intent(in)       ::  iLayer
+real(fp_kind), parameter    ::  sourceThreshold = 0.2
+real(fp_kind)   ::  maxElevation, thresholdElevation, totalDepth, averageDepth
+integer*4       ::  NSourceCells, i, j, ierror
+type(dim3)      ::  grid, tBlock
+
+write(*,*)
+if(GP%UseAverageDepth.eq.1) then
+    write(*,'(a,i0,a)') ' Kajiura filtering based on average water depth of source area (>', NINT(100*sourceThreshold), '% maximum elevation) ...'
+else
+    write(*,*) "Kajiura filtering based on local water depth at each grid point ..."
+endif
+
+!/// estimate average water depth of source area ///!
+if(GP%UseAverageDepth.eq.1) then
+    !///find the threshold elevation of source area///!
+    maxElevation = 0.0
+    !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+    do j = 1,LP(iLayer)%NY
+    do i = 1,LP(iLayer)%NX
+        maxElevation = MAX(maxElevation, ABS(LP(iLayer)%HK(i,j)))
+    enddo
+    enddo
+    ierror = cudaDeviceSynchronize()
+    thresholdElevation = sourceThreshold*maxElevation
+
+    !///find average water depth///!
+    NSourceCells = 0; totalDepth = 0.0
+    !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+    do j = 1,LP(iLayer)%NY
+    do i = 1,LP(iLayer)%NX
+        if(LP(iLayer)%Z(i,j).gt.0.0.and.ABS(LP(iLayer)%HK(i,j)).ge.thresholdElevation) then
+            NSourceCells = NSourceCells + 1
+            totalDepth = totalDepth + LP(iLayer)%Z(i,j)
+        endif
+    enddo
+    enddo
+    ierror = cudaDeviceSynchronize()
+    averageDepth = totalDepth/MAX(NSourceCells,1)
+    averageDepth = MAX(averageDepth,GP%MinKajiuraDepth)
+endif
+
+!/// convolve Kajiura's smoothing kernel with seafloor elevation ///!
+tBlock = dim3(GP%BlockDimX,GP%BlockDimY,1)
+grid = dim3(CEILING(1.0*LP(iLayer)%NX/tBlock%x),CEILING(1.0*LP(iLayer)%NY/tBlock%y),1)
+call convolveKajiuraKernel<<<grid,tBlock>>>(GP, LP, iLayer, KajiuraGreenRmax, averageDepth)
+ierror = cudaDeviceSynchronize()
+LP(iLayer)%HK = LP(iLayer)%HS
+
+end subroutine smoothElevation_Kajiura
+
+
+
+subroutine getLayerBoundaryFromParent(GPH, GPD, LPH, LPD, iLayer)
+
+use cudafor 
+use VariableDefination
+use pcomcotLIB_kernels
+implicit NONE
+type(HostGlobalParameters)              ::  GPH
+type(DeviceGlobalParameters), managed   ::  GPD
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+integer*4       ::  iLayer
+integer*4       ::  iPC, iBoundary, iHMN, nstartx, nendx, nstarty, nendy
+integer*4       ::  boundaryNX, boundaryNY
+integer*4       ::  ierror
+type(dim3)      ::  grid, tBlock
+real*4          ::  GPUTime
+
+tBlock = dim3(GPH%BlockDimX,GPH%BlockDimY,1)
+
+ierror = cudaEventRecord(startEvent,0)
+
+do iPC = 1,12
+    iBoundary = LPH(iLayer)%RecvFromParent(iPC,1)
+    iHMN      = LPH(iLayer)%RecvFromParent(iPC,2)
+    nstartx   = LPH(iLayer)%RecvFromParent(iPC,3)
+    nendx     = LPH(iLayer)%RecvFromParent(iPC,4)
+    nstarty   = LPH(iLayer)%RecvFromParent(iPC,5)
+    nendy     = LPH(iLayer)%RecvFromParent(iPC,6)
+
+    boundaryNX = nendx - nstartx + 1
+    boundaryNY = nendy - nstarty + 1
+    grid = dim3(CEILING(1.0*boundaryNX/tBlock%x),CEILING(1.0*boundaryNY/tBlock%y),1)   
+    !/// get H/M/N on the boundary of child layer ///!
+    call interpBoundaryHMNFromParent<<<grid,tBlock>>>(GPD, LPD, iLayer, iHMN, nstartx, nendx, nstarty, nendy)
+    !/// get non-hydrostatic pressure on the boundary of child layer ///!
+    if(LPH(iLayer)%Dispersion.eq.1.and.iHMN.eq.1) then
+        call interpBoundaryPressureFromParent<<<grid,tBlock>>>(GPD, LPD, iLayer, iHMN, nstartx, nendx, nstarty, nendy)
+    endif
+    !/// get viscosity and breaking age on the boundary of child layer ///!
+    if(LPH(iLayer)%Breaking.eq.1.and.iHMN.eq.1) then
+        call interpBoundaryViscosityFromParent<<<grid,tBlock>>>(GPD, LPD, iLayer, iHMN, nstartx, nendx, nstarty, nendy)
+    endif
+enddo
+
+ierror = cudaEventRecord(stopEvent,0)
+ierror = cudaEventSynchronize(stopEvent)
+ierror = cudaEventElapsedTime(GPUTime,startEvent,stopEvent)
+GPH%Timer(3) = GPH%Timer(3) + PCOMCOT_REAL_ONE*GPUTime*1.0E-3
+
+end subroutine getLayerBoundaryFromParent
+
+
+
+subroutine getLayerBoundaryAtFineTimeStep(GPH, GPD, LPH, LPD, iLayer, iStep)
+
+use cudafor 
+use VariableDefination
+use pcomcotLIB_kernels
+implicit NONE
+type(HostGlobalParameters)              ::  GPH
+type(DeviceGlobalParameters), managed   ::  GPD
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+integer*4       ::  iLayer, iStep
+integer*4       ::  iPC, iBoundary, iHMN, nstartx, nendx, nstarty, nendy
+integer*4       ::  boundaryNX, boundaryNY
+integer*4       ::  ierror
+type(dim3)      ::  grid, tBlock
+real*4          ::  GPUTime
+
+tBlock = dim3(GPH%BlockDimX,GPH%BlockDimY,1)
+
+ierror = cudaEventRecord(startEvent,0)
+
+do iPC = 1,12
+    iBoundary = LPH(iLayer)%RecvFromParent(iPC,1)
+    iHMN      = LPH(iLayer)%RecvFromParent(iPC,2)
+    nstartx   = LPH(iLayer)%RecvFromParent(iPC,3)
+    nendx     = LPH(iLayer)%RecvFromParent(iPC,4)
+    nstarty   = LPH(iLayer)%RecvFromParent(iPC,5)
+    nendy     = LPH(iLayer)%RecvFromParent(iPC,6)
+
+    boundaryNX = nendx - nstartx + 1
+    boundaryNY = nendy - nstarty + 1
+    grid = dim3(CEILING(1.0*boundaryNX/tBlock%x),CEILING(1.0*boundaryNY/tBlock%y),1)
+    !/// get H/M/N at this fine time step ///!
+    call interpBoundaryHMNAtFineStep<<<grid,tBlock>>>(GPD, LPD, iLayer, iStep, iHMN, nstartx, nendx, nstarty, nendy)
+    !/// get non-hydrostatic pressure at this fine time step ///!
+    if(LPH(iLayer)%Dispersion.eq.1.and.iHMN.eq.1) then
+        call interpBoundaryPressureAtFineStep<<<grid,tBlock>>>(GPD, LPD, iLayer, iStep, iHMN, nstartx, nendx, nstarty, nendy)
+    endif
+    !/// get viscosity and breaking age at this fine time step ///!
+    if(LPH(iLayer)%Breaking.eq.1.and.iHMN.eq.1) then
+        call interpBoundaryViscosityAtFineStep<<<grid,tBlock>>>(GPD, LPD, iLayer, iStep, iHMN, nstartx, nendx, nstarty, nendy)
+    endif
+enddo
+
+ierror = cudaEventRecord(stopEvent,0)
+ierror = cudaEventSynchronize(stopEvent)
+ierror = cudaEventElapsedTime(GPUTime,startEvent,stopEvent)
+GPH%Timer(3) = GPH%Timer(3) + PCOMCOT_REAL_ONE*GPUTime*1.0E-3
+
+end subroutine getLayerBoundaryAtFineTimeStep
+
+
+
+subroutine mass(GPH, GPD, LPH, LPD, iLayer, iStep, iTimeStep)
+
+use cudafor 
+use VariableDefination
+use SWE_kernels
+implicit NONE
+type(HostGlobalParameters)              ::  GPH
+type(DeviceGlobalParameters), managed   ::  GPD
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+integer*4       ::  iLayer, iStep, iTimeStep
+type(dim3)  ::  grid, tBlock
+real*4      ::  GPUTime
+integer*4   ::  ierror
+
+tBlock = dim3(GPH%BlockDimX,GPH%BlockDimY,1)
+grid = dim3(CEILING(1.0*LPH(iLayer)%NX/tBlock%x),CEILING(1.0*LPH(iLayer)%NY/tBlock%y),1)
+
+ierror = cudaEventRecord(startEvent,0)
+
+if(GPH%CoordinatesType.eq.1) then
+    call massCartesian<<<grid,tBlock>>>(GPD, LPD, iLayer)
+elseif(GPH%CoordinatesType.eq.0) then
+    call massSpherical<<<grid,tBlock>>>(GPD, LPD, iLayer)
+endif
+
+ierror = cudaEventRecord(stopEvent,0)
+ierror = cudaEventSynchronize(stopEvent)
+ierror = cudaEventElapsedTime(GPUTime,startEvent,stopEvent)
+GPH%Timer(3) = GPH%Timer(3) + PCOMCOT_REAL_ONE*GPUTime*1.0E-3
+
+end subroutine mass
+
+
+
+subroutine momentum(GPH, GPD, LPH, LPD, iLayer, iStep, iTimeStep)
+
+use cudafor 
+use VariableDefination
+use pcomcotLIB_kernels
+use SWE_kernels
+implicit NONE
+type(HostGlobalParameters)              ::  GPH
+type(DeviceGlobalParameters), managed   ::  GPD
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+integer*4       ::  iLayer, iStep, iTimeStep  
+type(dim3)  ::  grid, tBlock
+real*4      ::  GPUTime
+integer*4   ::  i, j, ierror
+
+tBlock = dim3(GPH%BlockDimX,GPH%BlockDimY,1)
+grid = dim3(CEILING(1.0*LPH(iLayer)%NX/tBlock%x),CEILING(1.0*LPH(iLayer)%NY/tBlock%y),1)
+
+ierror = cudaEventRecord(startEvent,0)
+
+!/// solve shallow water equations ///!
+call reconstructFlowDepth<<<grid,tBlock>>>(GPD, LPD, iLayer)
+if(GPH%CoordinatesType.eq.1) then
+    if(LPH(iLayer)%Nonlinearity.eq.0) then
+        call momentumLinearCartesian<<<grid,tBlock>>>(GPD, LPD, iLayer)
+    elseif(LPH(iLayer)%Nonlinearity.eq.1) then
+        call momentumNonlinearCartesian<<<grid,tBlock>>>(GPD, LPD, iLayer)
+    endif
+elseif(GPH%CoordinatesType.eq.0) then
+    if(LPH(iLayer)%Nonlinearity.eq.0) then
+        call momentumLinearSpherical<<<grid,tBlock>>>(GPD, LPD, iLayer)
+    elseif(LPH(iLayer)%Nonlinearity.eq.1) then
+        call momentumNonlinearSpherical<<<grid,tBlock>>>(GPD, LPD, iLayer)
+    endif
+endif
+
+!/// correct shallow water solution with non-hydrostatic pressure ///!
+if(LPH(iLayer)%Dispersion.eq.1) then
+    call addDispersion(GPD, LPD, iLayer, iStep, iTimeStep)
+endif
+
+!/// consider wave breaking with eddy-viscosity scheme ///!
+if(LPH(iLayer)%Breaking.eq.1) then
+    call addBreaking(GPD, LPD, iLayer, iStep, iTimeStep)
+endif
+
+!/// supress unreasonable volume flux ///!
+!$cuf kernel do (2) <<<(*,*),(*,*)>>>
+do j = 1,LPD(iLayer)%NY
+do i = 1,LPD(iLayer)%NX
+    if(i.le.LPD(iLayer)%NX-1) LPD(iLayer)%Mtmp(i,j) = LPD(iLayer)%M(2,i,j)
+    if(j.le.LPD(iLayer)%NY-1) LPD(iLayer)%Ntmp(i,j) = LPD(iLayer)%N(2,i,j)
+enddo
+enddo
+call froudeCap<<<grid,tBlock>>>(GPD, LPD, iLayer)
+
+!/// apply L-S type sponge damping to the top layer ///!
+if(GPH%BoundaryConditionType.eq.2.and.iLayer.eq.GPH%TopLayer) then
+    call dampSponge<<<grid,tBlock>>>(GPD, LPD, iLayer)
+endif
+
+ierror = cudaEventRecord(stopEvent,0)
+ierror = cudaEventSynchronize(stopEvent)
+ierror = cudaEventElapsedTime(GPUTime,startEvent,stopEvent)
+GPH%Timer(3) = GPH%Timer(3) + PCOMCOT_REAL_ONE*GPUTime*1.0E-3
+
+end subroutine momentum
+
+
+
+subroutine addDispersion(GP, LP, iLayer, iStep, iTimeStep)
+
+use cudafor 
+use VariableDefination
+use dispersion_kernels
+implicit NONE
+type(DeviceGlobalParameters), managed   ::  GP
+type(DeviceLayerParameters), managed    ::  LP(99)
+integer*4   ::  iLayer, iStep, iTimeStep
+type(dim3)  ::  grid, tBlock
+
+tBlock = dim3(GP%BlockDimX,GP%BlockDimY,1)
+grid = dim3(CEILING(1.0*LP(iLayer)%NX/tBlock%x),CEILING(1.0*LP(iLayer)%NY/tBlock%y),1)
+
+call computeBottomVerticalVelocity<<<grid,tBlock>>>(GP, LP, iLayer)
+
+!/// start calculating non-hydrostatic pressure at the 2nd time step ///!
+if(iTimeStep.gt.1) then
+    call preparePressureEquationConstruction<<<grid,tBlock>>>(GP, LP, iLayer)
+    call constructDynamicPressureEquations<<<grid,tBlock>>>(GP, LP, iLayer)
+    call solveDynamicPressure(GP, LP, iLayer)
+    call correctSWEWithDynamicPressure<<<grid,tBlock>>>(GP, LP, iLayer)
+    call computeSurfaceVerticalVelocityWithPressure<<<grid,tBlock>>>(GP, LP, iLayer)
+else
+    LP(iLayer)%Q = 0.0
+    call computeSurfaceVerticalVelocityWithoutPressure<<<grid,tBlock>>>(GP, LP, iLayer)
+endif
+
+
+end subroutine addDispersion
+
+
+
+subroutine addBreaking(GP, LP, iLayer, iStep, iTimeStep)
+
+use cudafor 
+use VariableDefination
+use breaker_kernels
+implicit NONE
+type(DeviceGlobalParameters), managed   ::  GP
+type(DeviceLayerParameters), managed    ::  LP(99)
+integer*4   ::  iLayer, iStep, iTimeStep
+integer*4   ::  ierror
+type(dim3)  ::  grid, tBlock
+
+tBlock = dim3(GP%BlockDimX,GP%BlockDimY,1)
+grid = dim3(CEILING(1.0*LP(iLayer)%NX/tBlock%x), CEILING(1.0*LP(iLayer)%NY/tBlock%y), 1)
+
+if(iTimeStep.gt.1) then ! We assume that the wave does not break at the first time step
+
+    call eddyViscosity<<<grid,tBlock>>>(GP, LP, iLayer)
+    call smoothEddyViscosity<<<grid,tBlock>>>(GP, LP, iLayer)
+    ierror = cudaDeviceSynchronize()
+    LP(iLayer)%Brkv = LP(iLayer)%Brkv_smooth
+    if(GP%CoordinatesType.eq.1) then
+        call breakingCartesian<<<grid,tBlock>>>(GP, LP, iLayer)
+    elseif(GP%CoordinatesType.eq.0) then
+        call breakingSpherical<<<grid,tBlock>>>(GP, LP, iLayer)
+    endif
+
+endif
+
+end subroutine addBreaking
+
+
+
+subroutine updateComputedResults(GPH, GPD, LPH, LPD, iLayer)
+
+use cudafor 
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)              ::  GPH
+type(DeviceGlobalParameters), managed   ::  GPD
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+integer*4   ::  iLayer
+integer*4   ::  i, j, ierror
+
+!$cuf kernel do (2) <<<(*,*),(*,*)>>>
+do j = 1,LPD(iLayer)%NY
+do i = 1,LPD(iLayer)%NX
+    LPD(iLayer)%H(1,i,j) = LPD(iLayer)%H(2,i,j)
+enddo
+enddo
+
+!$cuf kernel do (2) <<<(*,*),(*,*)>>>
+do j = 1,LPD(iLayer)%NY
+do i = 1,LPD(iLayer)%NX-1
+    LPD(iLayer)%M(1,i,j) = LPD(iLayer)%M(2,i,j)
+enddo
+enddo
+
+!$cuf kernel do (2) <<<(*,*),(*,*)>>>
+do j = 1,LPD(iLayer)%NY-1
+do i = 1,LPD(iLayer)%NX
+    LPD(iLayer)%N(1,i,j) = LPD(iLayer)%N(2,i,j)
+enddo
+enddo
+
+if(LPD(iLayer)%Dispersion.eq.1) then
+    !$cuf kernel do (2) <<<(*,*),(*,*)>>>
+    do j = 1,LPD(iLayer)%NY
+    do i = 1,LPD(iLayer)%NX
+        LPD(iLayer)%WS(1,i,j) = LPD(iLayer)%WS(2,i,j)
+        LPD(iLayer)%WB(1,i,j) = LPD(iLayer)%WB(2,i,j)
+    enddo
+    enddo
+endif
+
+ierror = cudaDeviceSynchronize()
+
+end subroutine updateComputedResults
+
+
+
+subroutine calculateStationData(GP, LP, SP, iTimeStep)
+
+use cudafor 
+use VariableDefination
+use pcomcotLIB_kernels
+implicit NONE
+type(DeviceGlobalParameters), managed   ::  GP
+type(DeviceLayerParameters), managed    ::  LP(99)
+type(DeviceStationParameters), managed  ::  SP(999)
+integer*4   ::  iTimeStep
+integer*4   ::  ierror
+
+call interpStationData<<<CEILING(1.0*GP%NumStations/256),256>>>(GP, LP, SP, iTimeStep)
+ierror = cudaDeviceSynchronize()
+
+end subroutine calculateStationData
+
+
+
+subroutine fetchStationDataFromDevice(GP, LP, SPH, SPD)
+
+use cudafor 
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)              ::  GP
+type(HostLayerParameters)               ::  LP(99)
+type(HostStationParameters)             ::  SPH(999)
+type(DeviceStationParameters), managed  ::  SPD(999)
+integer*4   ::  iSta
+
+do iSta = 1,GP%NumStations
+    SPH(iSta)%H = SPD(iSta)%H
+    if(GP%SaveFlux.eq.1) then
+        SPH(iSta)%M = SPD(iSta)%M
+        SPH(iSta)%N = SPD(iSta)%N
+    endif
+    if(GP%SaveDynamicPressure.eq.1.and.LP(SPH(iSta)%nLayer)%Dispersion.eq.1) then
+        SPH(iSta)%Q = SPD(iSta)%Q
+    endif
+enddo
+
+end subroutine fetchStationDataFromDevice
+
+
+
+subroutine saveStationData(GP, LP, SP, iCal)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)      ::  GP
+type(HostLayerParameters)       ::  LP(99)
+type(HostStationParameters)     ::  SP(999)
+integer*4       ::  iCal
+integer*4       ::  iSta, j
+character(999)  ::  s
+real(fp_kind)   ::  CPUTime1, CPUTime2
+
+call CPU_TIME(CPUTime1)
+
+do iSta = 1,GP%NumStations
+
+    write(s,'(a,i4.4,a4)') TRIM(ADJUSTL(GP%ResultPath))//'Station', iSta, '.dat'
+    open(1000+iSta,file=TRIM(ADJUSTL(s)),status='old',form='unformatted',access='append')
+    if(iCal.eq.1) then
+        write(1000+iSta) (GP%t(j), j=1,GP%TotalTimeSteps+1)
+    endif
+    write(1000+iSta) (SP(iSta)%H(j), j=1,GP%TotalTimeSteps+1)
+    close(1000+iSta)
+    
+    if(GP%SaveFlux.eq.1) then
+    
+    write(s,'(a,i4.4,a6)') TRIM(ADJUSTL(GP%ResultPath))//'Station', iSta, '_M.dat'
+    open(1000+iSta,file=TRIM(ADJUSTL(s)),status ='old',form='unformatted',access='append')
+    if(iCal.eq.1) then
+        write(1000+iSta) (GP%t(j), j=1,GP%TotalTimeSteps+1)
+    endif
+    write(1000+iSta) (SP(iSta)%M(j), j=1,GP%TotalTimeSteps+1)
+    close(1000+iSta)
+    
+    write(s,'(a,i4.4,a6)') TRIM(ADJUSTL(GP%ResultPath))//'Station', iSta, '_N.dat'
+    open(1000+iSta,file=TRIM(ADJUSTL(s)),status='old',form='unformatted',access='append')
+    if(iCal.eq.1) then
+        write(1000+iSta) (GP%t(j), j=1,GP%TotalTimeSteps+1)
+    endif
+    write(1000+iSta) (SP(iSta)%N(j), j=1,GP%TotalTimeSteps+1)
+    close(1000+iSta)
+    
+    endif
+    
+    if(GP%SaveDynamicPressure.eq.1.and.LP(SP(iSta)%nLayer)%Dispersion.eq.1) then
+    
+    write(s,'(a,i4.4,a6)') TRIM(ADJUSTL(GP%ResultPath))//'Station', iSta, '_Q.dat'
+    open(1000+iSta,file=TRIM(ADJUSTL(s)),status ='old',form='unformatted',access='append')
+    if(iCal.eq.1) then
+        write(1000+iSta) (GP%t(j), j=1,GP%TotalTimeSteps+1)
+    endif
+    write(1000+iSta) (SP(iSta)%Q(j), j=1,GP%TotalTimeSteps+1)
+    close(1000+iSta)
+    
+    endif
+    
+enddo
+
+call CPU_TIME(CPUTime2); GP%Timer(5) = GP%Timer(5)+CPUTime2-CPUTime1
+
+end subroutine saveStationData
+
+
+
+subroutine interpData(GP, LP, iLayer, iFlag, x, y, val)
+!! iFlag = -1,-2,-3: interpolate H,M,N(1,i,j)
+!! iFlag = 1,2,3: interpolate H,M,N(2,i,j)
+!! iFlag = 0: interpolate Z(i,j)
+!! iFlag = 4: interpolate Q(i,j)
+    
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)   ::  GP
+type(HostLayerParameters)    ::  LP(99)
+integer*4       ::  iLayer, iFlag, iTime
+real(fp_kind)   ::  x, y, val
+integer*4       ::  ii, jj, ii2, jj2
+integer*4       ::  i1, i2, i3, i4
+real(fp_kind)   ::  x1, y1, x2, y2, invx, invy
+real(fp_kind)   ::  z1, z2, z3, z4
+    
+if(iFlag.lt.0) then
+    iTime = 1
+else
+    iTime = 2
+endif
+if(iFlag.eq.0) then
+    ii  = FLOOR((x-LP(iLayer)%X(1))/LP(iLayer)%dx)+1
+    jj  = FLOOR((y-LP(iLayer)%Y(1))/LP(iLayer)%dy)+1
+    ii2 = MIN(ii+1, LP(iLayer)%NX)
+    jj2 = MIN(jj+1, LP(iLayer)%NY)
+    z1  = LP(iLayer)%Z(ii,jj)
+    z2  = LP(iLayer)%Z(ii2,jj)
+    z3  = LP(iLayer)%Z(ii,jj2)
+    z4  = LP(iLayer)%Z(ii2,jj2)
+    x1  = LP(iLayer)%X(ii);  y1 = LP(iLayer)%Y(jj)
+    x2  = LP(iLayer)%X(ii2); y2 = LP(iLayer)%Y(jj2)
+elseif(iFlag.eq.-1.or.iFlag.eq.1) then
+    ii  = FLOOR((x-LP(iLayer)%X(1))/LP(iLayer)%dx)+1
+    jj  = FLOOR((y-LP(iLayer)%Y(1))/LP(iLayer)%dy)+1
+    ii2 = MIN(ii+1, LP(iLayer)%NX)
+    jj2 = MIN(jj+1, LP(iLayer)%NY)
+    z1  = LP(iLayer)%H(iTime,ii,jj)
+    z2  = LP(iLayer)%H(iTime,ii2,jj)
+    z3  = LP(iLayer)%H(iTime,ii,jj2)
+    z4  = LP(iLayer)%H(iTime,ii2,jj2)
+    x1  = LP(iLayer)%X(ii);  y1 = LP(iLayer)%Y(jj)
+    x2  = LP(iLayer)%X(ii2); y2 = LP(iLayer)%Y(jj2)
+elseif(iFlag.eq.-2.or.iFlag.eq.2) then
+    ii  = FLOOR((x-LP(iLayer)%X(1)-LP(iLayer)%dx*0.5)/LP(iLayer)%dx)+1
+    jj  = FLOOR((y-LP(iLayer)%Y(1))/LP(iLayer)%dy)+1
+    ii2 = MIN(ii+1, LP(iLayer)%NX-1)
+    jj2 = MIN(jj+1, LP(iLayer)%NY)
+    if(ii.eq.0) then
+        ii = 1; ii2 = 1
+    endif
+    z1 = LP(iLayer)%M(iTime,ii,jj)
+    z2 = LP(iLayer)%M(iTime,ii2,jj)
+    z3 = LP(iLayer)%M(iTime,ii,jj2)
+    z4 = LP(iLayer)%M(iTime,ii2,jj2)
+    x1 = LP(iLayer)%X(ii)+LP(iLayer)%dx*0.5;  y1 = LP(iLayer)%Y(jj)
+    x2 = LP(iLayer)%X(ii2)+LP(iLayer)%dx*0.5; y2 = LP(iLayer)%Y(jj2)           
+elseif(iFlag.eq.-3.or.iFlag.eq.3) then
+    ii  = FLOOR((x-LP(iLayer)%X(1))/LP(iLayer)%dx)+1
+    jj  = FLOOR((y-LP(iLayer)%Y(1)-LP(iLayer)%dy*0.5)/LP(iLayer)%dy)+1
+    ii2 = MIN(ii+1, LP(iLayer)%NX)
+    jj2 = MIN(jj+1, LP(iLayer)%NY-1)
+    if(jj.eq.0) then
+        jj = 1; jj2 = 1
+    endif
+    z1 = LP(iLayer)%N(iTime,ii,jj)
+    z2 = LP(iLayer)%N(iTime,ii2,jj)
+    z3 = LP(iLayer)%N(iTime,ii,jj2)
+    z4 = LP(iLayer)%N(iTime,ii2,jj2)
+    x1 = LP(iLayer)%X(ii);  y1 = LP(iLayer)%Y(jj)+0.5*LP(iLayer)%dy
+    x2 = LP(iLayer)%X(ii2); y2 = LP(iLayer)%Y(jj2)+0.5*LP(iLayer)%dy
+elseif(iFlag.eq.4) then
+    ii  = FLOOR((x-LP(iLayer)%X(1))/LP(iLayer)%dx)+1
+    jj  = FLOOR((y-LP(iLayer)%Y(1))/LP(iLayer)%dy)+1
+    ii2 = MIN(ii+1, LP(iLayer)%NX)
+    jj2 = MIN(jj+1, LP(iLayer)%NY)
+    x1 = LP(iLayer)%X(ii);  y1 = LP(iLayer)%Y(jj)
+    x2 = LP(iLayer)%X(ii2); y2 = LP(iLayer)%Y(jj2)
+    z1 = LP(iLayer)%Q(ii,jj);  z2 = LP(iLayer)%Q(ii2,jj)
+    z3 = LP(iLayer)%Q(ii,jj2); z4 = LP(iLayer)%Q(ii2,jj2)
+endif
+                
+i1 = 1; i2 = 1; i3 = 1; i4 = 1
+if(iFlag.eq.1.or.iFlag.eq.-1.or.iFlag.ge.4) then
+    if(LP(iLayer)%Z(ii,jj)+LP(iLayer)%H(iTime,ii,jj).le.0.0) i1 = 0
+    if(LP(iLayer)%Z(ii2,jj)+LP(iLayer)%H(iTime,ii2,jj).le.0.0) i2 = 0
+    if(LP(iLayer)%Z(ii,jj2)+LP(iLayer)%H(iTime,ii,jj2).le.0.0) i3 = 0
+    if(LP(iLayer)%Z(ii2,jj2)+LP(iLayer)%H(iTime,ii2,jj2).le.0.0) i4 = 0
+    if(i1.eq.0.and.i2.eq.0.and.i3.eq.0.and.i4.eq.0) then
+        i1 = 1; z1 = 0.0
+    endif
+elseif(iFlag.ne.0) then
+    if(LP(iLayer)%Z(ii,jj).le.-GP%PermanentDryLimit) i1 = 0
+    if(LP(iLayer)%Z(ii2,jj).le.-GP%PermanentDryLimit) i2 = 0
+    if(LP(iLayer)%Z(ii,jj2).le.-GP%PermanentDryLimit) i3 = 0
+    if(LP(iLayer)%Z(ii2,jj2).le.-GP%PermanentDryLimit) i4 = 0
+    if(i1.eq.0.and.i2.eq.0.and.i3.eq.0.and.i4.eq.0) then
+        i1 = 1; z1 = 0.0
+    endif
+endif
+if(i1.eq.1.and.i2.eq.0.and.i3.eq.0.and.i4.eq.0) then
+    ii2 = ii; jj2 = jj
+elseif(i1.eq.0.and.i2.eq.1.and.i3.eq.0.and.i4.eq.0) then
+    ii = ii2; jj2 = jj; z1 = z2
+elseif(i1.eq.0.and.i2.eq.0.and.i3.eq.1.and.i4.eq.0) then
+    ii2 = ii; jj = jj2; z1 = z3
+elseif(i1.eq.0.and.i2.eq.0.and.i3.eq.0.and.i4.eq.1) then
+    ii = ii2; jj = jj2; z1 = z4
+elseif(i1.eq.1.and.i2.eq.1.and.i3.eq.0.and.i4.eq.0) then
+    jj2 = jj;
+elseif(i1.eq.1.and.i2.eq.0.and.i3.eq.1.and.i4.eq.0) then
+    ii2 = ii;
+elseif(i1.eq.0.and.i2.eq.1.and.i3.eq.0.and.i4.eq.1) then
+    ii = ii2; z1 = z2; z3 = z4
+elseif(i1.eq.0.and.i2.eq.0.and.i3.eq.1.and.i4.eq.1) then
+    jj = jj2; z1 = z3; z2 = z4
+elseif(i1.eq.1.and.i2.eq.0.and.i3.eq.0.and.i4.eq.1) then
+    jj2 = jj; z2 = z4
+elseif(i1.eq.0.and.i2.eq.1.and.i3.eq.1.and.i4.eq.0) then
+    jj2 = jj; z1 = z3
+elseif((i1.eq.0.or.i2.eq.0).and.i3.eq.1.and.i4.eq.1) then
+    jj = jj2; z1 = z3; z2 = z4
+elseif(i1.eq.1.and.i2.eq.1.and.(i3.eq.0.or.i4.eq.0)) then
+    jj2 = jj
+endif
+    
+if(ii.ne.ii2) invx = 1.0/(x2-x1)
+if(jj.ne.jj2) invy = 1.0/(y2-y1)
+if(ii.eq.ii2.or.jj.eq.jj2) then
+    if(ii.eq.ii2.and.jj.eq.jj2) then
+        val = z1
+    elseif(ii.eq.ii2) then
+        val = -z1*(y-y2)*invy+z3*(y-y1)*invy
+    else
+        val = -z1*(x-x2)*invx+z2*(x-x1)*invx
+    endif
+else
+    val = z1*(x2-x)*(y2-y)+z2*(x-x1)*(y2-y)+z3*(x2-x)*(y-y1)+z4*(x-x1)*(y-y1)
+    val = val*invx*invy
+endif
+    
+end subroutine interpData
+
+
+
+subroutine fetchResultsFromDevice(GP, LPH, LPD, iTimeStep)
+
+use cudafor 
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)              ::  GP
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+integer*4       ::  iTimeStep
+integer*4       ::  iLayer
+real(fp_kind)   ::  CPUTime1, CPUTime2
+
+call CPU_TIME(CPUTime1)
+
+do iLayer = 1,GP%NumLayers
+    LPH(iLayer)%H = LPD(iLayer)%H !transfer water elevation
+    LPH(iLayer)%M = LPD(iLayer)%M !transfer flux component M
+    LPH(iLayer)%N = LPD(iLayer)%N !transfer flux component N
+    if(iTimeStep.eq.GP%TotalTimeSteps) then 
+        LPH(iLayer)%Hmax = LPD(iLayer)%Hmax !transfer maximum water elevation
+        LPH(iLayer)%Hmin = LPD(iLayer)%Hmin !transfer minimum water elevation
+    endif
+    if(LPH(iLayer)%Dispersion.eq.1) then 
+        LPH(iLayer)%Q = LPD(iLayer)%Q !transfer non-hydrostatic pressure
+        ! LPH(iLayer)%PL = LPD(iLayer)%PL !transfer equations of non-hydrostatic pressure for testing BiCGSTAB
+        ! LPH(iLayer)%PR = LPD(iLayer)%PR 
+        ! LPH(iLayer)%PB = LPD(iLayer)%PB
+        ! LPH(iLayer)%PT = LPD(iLayer)%PT
+        ! LPH(iLayer)%PC = LPD(iLayer)%PC
+        ! LPH(iLayer)%PQ = LPD(iLayer)%PQ
+    endif
+enddo
+
+call CPU_TIME(CPUTime2); GP%Timer(4) = GP%Timer(4)+CPUTime2-CPUTime1
+
+end subroutine fetchResultsFromDevice
+
+
+
+subroutine saveSnapshot(GP, LP, iTimeStep)
+
+use cudafor 
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)              ::  GP
+type(HostLayerParameters)               ::  LP(99)
+integer*4       ::  iTimeStep
+integer*4       ::  iLayer, i, j, iFlag
+character(999)  ::  s
+real(fp_kind)   ::  CPUTime1, CPUTime2
+
+call CPU_TIME(CPUTime1)
+
+do iLayer = 1,GP%NumLayers
+    !/// write water elevation ///!
+    write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'z_',iLayer,'_',iTimeStep,'.dat'
+    open(22,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+    write(22) fp_kind !indicate the floating-point precision used in binary files
+    write(22) LP(iLayer)%NX, LP(iLayer)%NY
+    if(iTimeStep.eq.0) then
+        do j = 1,LP(iLayer)%NY
+            write(22) (LP(iLayer)%H(1,i,j), i=1,LP(iLayer)%NX)
+        enddo
+    else
+        do j = 1,LP(iLayer)%NY
+            write(22) (LP(iLayer)%H(2,i,j), i=1,LP(iLayer)%NX)
+        enddo
+    endif
+    close(22)
+
+    if(GP%SaveFlux.eq.1) then
+        !/// write flux component M ///!
+        write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'M_',iLayer,'_',iTimeStep,'.dat'
+        open(33,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        write(33) fp_kind
+        write(33) LP(iLayer)%NX-1, LP(iLayer)%NY
+        if(iTimeStep.eq.0) then
+            do j = 1,LP(iLayer)%NY
+                write(33) (LP(iLayer)%M(1,i,j), i=1,LP(iLayer)%NX-1)
+            enddo
+        else
+            do j = 1,LP(iLayer)%NY
+                write(33) (LP(iLayer)%M(2,i,j), i=1,LP(iLayer)%NX-1)
+            enddo
+        endif
+        close(33)
+        !/// write flux component N ///!
+        write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'N_',iLayer,'_',iTimeStep,'.dat'
+        open(44,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        write(44) fp_kind
+        write(44) LP(iLayer)%NX, LP(iLayer)%NY-1
+        if(iTimeStep.eq.0) then
+            do j = 1,LP(iLayer)%NY-1
+                write(44) (LP(iLayer)%N(1,i,j), i=1,LP(iLayer)%NX)
+            enddo
+        else
+            do j = 1,LP(iLayer)%NY-1
+                write(44) (LP(iLayer)%N(2,i,j), i=1,LP(iLayer)%NX)
+            enddo
+        endif
+        close(44)
+    endif
+
+    if(iTimeStep.eq.GP%TotalTimeSteps) then
+        !/// write maximum water elevation ///!
+        write(s,'(a,i2.2,a4)') TRIM(ADJUSTL(GP%ResultPath))//'zmax_',iLayer,'.dat'
+        open(55,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        write(55) fp_kind
+        write(55) LP(iLayer)%NX, LP(iLayer)%NY
+        do j = 1,LP(iLayer)%NY
+            write(55) (LP(iLayer)%Hmax(i,j), i=1,LP(iLayer)%NX)
+        enddo
+        close(55)
+        !/// write minimum water elevation ///!
+        write(s,'(a,i2.2,a4)') TRIM(ADJUSTL(GP%ResultPath))//'zmin_',iLayer,'.dat'
+        open(66,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        write(66) fp_kind
+        write(66) LP(iLayer)%NX, LP(iLayer)%NY
+        do j = 1,LP(iLayer)%NY
+            write(66) (LP(iLayer)%Hmin(i,j), i=1,LP(iLayer)%NX)
+        enddo
+        close(66)
+    endif
+
+    if(GP%SaveDynamicPressure.eq.1.and.LP(iLayer)%Dispersion.eq.1) then
+        !/// write non-hydrostatic pressure ////!
+        write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'Q_',iLayer,'_',iTimeStep,'.dat'
+        open(77,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        write(77) fp_kind
+        write(77) LP(iLayer)%NX, LP(iLayer)%NY
+        do j = 1,LP(iLayer)%NY
+            write(77) (LP(iLayer)%Q(i,j), i=1,LP(iLayer)%NX)
+        enddo
+        close(77)
+
+        !/// write equations of non-hydrostatic pressure ////!
+        ! do iFlag = 1,6
+        !     if(iFlag.eq.1) then
+        !         write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'PL_',iLayer,'_',iTimeStep,'.dat'
+        !     elseif(iFlag.eq.2) then
+        !         write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'PR_',iLayer,'_',iTimeStep,'.dat'
+        !     elseif(iFlag.eq.3) then
+        !         write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'PB_',iLayer,'_',iTimeStep,'.dat'
+        !     elseif(iFlag.eq.4) then
+        !         write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'PT_',iLayer,'_',iTimeStep,'.dat'
+        !     elseif(iFlag.eq.5) then
+        !         write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'PC_',iLayer,'_',iTimeStep,'.dat'
+        !     elseif(iFlag.eq.6) then
+        !         write(s,'(a,i2.2,a1,i6.6,a4)') TRIM(ADJUSTL(GP%ResultPath))//'PQ_',iLayer,'_',iTimeStep,'.dat'
+        !     endif
+        !     open(88,file=TRIM(ADJUSTL(s)),status='replace',form='unformatted')
+        !     write(88) fp_kind
+        !     write(88) LP(iLayer)%NX, LP(iLayer)%NY
+        !     do j = 1,LP(iLayer)%NY
+        !         if(iFlag.eq.1) then
+        !             write(88) (LP(iLayer)%PL(i,j), i=1,LP(iLayer)%NX)
+        !         elseif(iFlag.eq.2) then
+        !             write(88) (LP(iLayer)%PR(i,j), i=1,LP(iLayer)%NX)
+        !         elseif(iFlag.eq.3) then
+        !             write(88) (LP(iLayer)%PB(i,j), i=1,LP(iLayer)%NX)
+        !         elseif(iFlag.eq.4) then
+        !             write(88) (LP(iLayer)%PT(i,j), i=1,LP(iLayer)%NX)
+        !         elseif(iFlag.eq.5) then
+        !             write(88) (LP(iLayer)%PC(i,j), i=1,LP(iLayer)%NX)
+        !         elseif(iFlag.eq.6) then
+        !             write(88) (LP(iLayer)%PQ(i,j), i=1,LP(iLayer)%NX)
+        !         endif
+        !     enddo
+        !     close(88)
+        ! enddo
+
+    endif
+enddo
+
+call CPU_TIME(CPUTime2); GP%Timer(5) = GP%Timer(5)+CPUTime2-CPUTime1
+
+end subroutine saveSnapshot
+
+
+
+subroutine screenOutput(GP, iCal, iTimeStep)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+integer*4       ::  iCal, iTimeStep
+real(fp_kind)   ::  CPUTime, ETA
+real(fp_kind)   ::  tt, calt, comt, writ
+integer*4       ::  nh, nm, ns
+        
+if(iTimeStep.eq.-1) then
+    write(*,*)
+    if(GP%PurposeCalculation.eq.1) then
+        write(*,*) '==================== Start Computing : Regular Simulation ===================='
+    elseif(GP%PurposeCalculation.eq.2) then
+        write(*,'(a,i3,a,i5,a)') '=========== Start Computing : Green''s Functions (Fault ', &
+            iCal,' of ',GP%nCalculations,') ==========='
+    elseif(GP%PurposeCalculation.eq.3) then
+        write(*,'(a,i3,a,i5,a)') '====== Start Computing : Green''s Functions (Initial Height ', &
+            iCal,' of ',GP%nCalculations,') ======'
+    endif
+    write(*,*)
+elseif(iTimeStep.gt.0.and.iTimeStep.le.GP%TotalTimeSteps) then
+    call CPU_TIME(CPUTime)
+    if((iTimeStep.eq.10).or. &
+        (iTimeStep.gt.10.and.CPUTime-GP%CPUTimeInitial-GP%Timer(1).ge.120.0).or.&
+        (iTimeStep.gt.10.and.MOD(iTimeStep,MAX(1,GP%TotalTimeSteps/20)).eq.0)) then
+        ETA = (GP%TotalTimeSteps-iTimeStep)*(CPUTime-GP%CPUTimeInitialCalculation)/iTimeStep
+        nh = FLOOR(ETA/3600.0)
+        nm = FLOOR((ETA-nh*3600.0)/60.0)
+        ns = INT(ETA-nh*3600.0-nm*60.0)
+        write(*,*)
+        write(*,*) '===================== CALCULATION OUTPUT ========================'
+        write(*,*) '    TimeStep       Seconds       Percentage       ETA(hh:mm:ss)'
+        if(iTimeStep.eq.10) then
+            write(*,'(i11,f16.1,9x,f4.1,a2,i13.2,a1,i2.2,a1,i2.2)') &
+                0, 0.0, 0.0, '%', nh, ':', nm, ':', ns
+        else
+            write(*,'(i11,f16.1,8x,f5.1,a2,i13.2,a1,i2.2,a1,i2.2)') &
+                iTimeStep, iTimeStep*GP%dt, 1.0*iTimeStep/GP%TotalTimeSteps*100, '%', &
+                nh, ':', nm, ':', ns
+        endif
+        GP%Timer(1) = CPUTime-GP%CPUTimeInitial
+    endif
+endif
+if(iTimeStep.eq.GP%TotalTimeSteps) then
+    write(*,*) '==================================================='
+endif
+        
+if(iCal.eq.GP%nCalculations+100.and.iTimeStep.eq.GP%TotalTimeSteps+100) then
+    tt   = GP%Timer(1); calt = GP%Timer(3)
+    comt = GP%Timer(4); writ = GP%Timer(5)
+    write(*,*)
+    write(*,*) '========================================================================'
+    write(*,*) 'PCOMCOT-GPU calculation completed.'
+    write(*,*)
+    write(*,'(a)')              ' Timing Information:'
+    nh = FLOOR(tt/3600.0); nm = FLOOR((tt-nh*3600.0)/60.0); ns = NINT(tt-3600.0*nh-60.0*nm)
+    write(*,'(a,i2.2,a1,i2.2,a1,i2.2,f10.1,a)') &
+        ' Total Time        : ', nh, ':', nm, ':', ns, 100.0, ' %'
+    nh = FLOOR(calt/3600.0); nm = FLOOR((calt-nh*3600.0)/60.0); ns = NINT(calt-3600.0*nh-60.0*nm)
+    write(*,'(a,i2.2,a1,i2.2,a1,i2.2,f10.1,a)') &
+        ' GPU Calculation   : ', nh, ':', nm, ':', ns, calt/tt*100, ' %'
+    nh = FLOOR(comt/3600.0); nm = FLOOR((comt-nh*3600.0)/60.0); ns = NINT(comt-3600.0*nh-60.0*nm)   
+    write(*,'(a,i2.2,a1,i2.2,a1,i2.2,f10.1,a)') &
+        ' CPU-GPU Transfer  : ', nh, ':', nm, ':', ns, comt/tt*100, ' %'
+    nh = FLOOR(writ/3600.0); nm = FLOOR((writ-nh*3600.0)/60.0); ns = NINT(writ-3600.0*nh-60.0*nm) 
+    write(*,'(a,i2.2,a1,i2.2,a1,i2.2,f10.1,a)') &
+        ' Write to File     : ', nh, ':', nm, ':', ns, writ/tt*100, ' %'
+    write(*,*)
+endif
+        
+end subroutine screenOutput
+
+
+
+subroutine releaseDeviceMemory(GP, LPH, LPD, SPH, SPD)
+
+use cudafor
+use VariableDefination
+implicit NONE    
+type(HostGlobalParameters)              ::  GP
+type(HostLayerParameters)               ::  LPH(99)
+type(DeviceLayerParameters), managed    ::  LPD(99)
+type(HostStationParameters)             ::  SPH(999)
+type(DeviceStationParameters), managed  ::  SPD(999)
+integer*4   ::  iLayer, iSta, ierror, status
+
+!/// release the space assigned to GlobalPrameters ///!
+DEALLOCATE(GP%t, stat=ierror)
+
+!/// release layer arrays on host ///!
+do iLayer = 1,GP%NumLayers
+    DEALLOCATE(LPH(iLayer)%X, LPH(iLayer)%Y, LPH(iLayer)%Z, stat=ierror)
+    DEALLOCATE(LPH(iLayer)%H, LPH(iLayer)%M, LPH(iLayer)%N, stat=ierror)
+    DEALLOCATE(LPH(iLayer)%Q, LPH(iLayer)%Hmin, LPH(iLayer)%Hmax, stat=ierror)
+enddo
+
+!/// release layer arrays on device ///!
+do iLayer = 1,GP%NumLayers
+    DEALLOCATE(LPD(iLayer)%X, LPD(iLayer)%Y, LPD(iLayer)%Z, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%H, LPD(iLayer)%M, LPD(iLayer)%N, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%H0, LPD(iLayer)%M0, LPD(iLayer)%N0, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%HF, LPD(iLayer)%MF, LPD(iLayer)%NF, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%Hmax, LPD(iLayer)%Hmin, LPD(iLayer)%HK, LPD(iLayer)%HS, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%Mtmp, LPD(iLayer)%Ntmp, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%D_M, LPD(iLayer)%D_N, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%Sign_M, LPD(iLayer)%Sign_N, stat=ierror)
+
+
+    DEALLOCATE(LPD(iLayer)%Q, LPD(iLayer)%Q0, LPD(iLayer)%QF, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%Has_Q, LPD(iLayer)%WB, LPD(iLayer)%WS, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%PL, LPD(iLayer)%PR, LPD(iLayer)%PB, LPD(iLayer)%PT, LPD(iLayer)%PC, LPD(iLayer)%PQ, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%PCA, LPD(iLayer)%PCB, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%BrkAge, LPD(iLayer)%BrkAge0, LPD(iLayer)%BrkAgeF, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%Brkv, LPD(iLayer)%Brkv_smooth, LPD(iLayer)%Brkv0, LPD(iLayer)%BrkvF, stat=ierror)
+
+    DEALLOCATE(LPD(iLayer)%SpongeMANNING, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%CPX, LPD(iLayer)%CPY, LPD(iLayer)%CSY, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%CS1, LPD(iLayer)%CS2, LPD(iLayer)%CS3, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%CS6, LPD(iLayer)%CS7, LPD(iLayer)%CS8, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%CSD1, LPD(iLayer)%CSD2, LPD(iLayer)%CSD3, LPD(iLayer)%CSD4, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%CSB1, LPD(iLayer)%CSB2, LPD(iLayer)%CSB3, LPD(iLayer)%CSB4, stat=ierror)
+
+    DEALLOCATE(LPD(iLayer)%csrColIndA, LPD(iLayer)%csrRowPtrA, stat=ierror)
+    DEALLOCATE(LPD(iLayer)%csrValA, LPD(iLayer)%vecB, LPD(iLayer)%vecX, LPD(iLayer)%vecR, LPD(iLayer)%vecRC0, LPD(iLayer)%vecV, &
+               LPD(iLayer)%vecP, LPD(iLayer)%vecS, LPD(iLayer)%vecT, LPD(iLayer)%vecSC, LPD(iLayer)%vecTC, LPD(iLayer)%vecY, &
+               LPD(iLayer)%vecZ, LPD(iLayer)%vecDInverse, stat=ierror)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecX)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecR)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecV)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecP)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecS)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecT)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecSC)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecTC)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecY)
+    status = cusparseDestroyDnVec(LPD(iLayer)%dnVecZ)
+    status = cusparseDestroySpMat(LPD(iLayer)%sparseMatA)
+enddo
+
+!/// release station arrays on host and device ///!
+do iSta = 1,GP%NumStations
+    DEALLOCATE(SPH(iSta)%H, SPH(iSta)%M, SPH(iSta)%N, SPH(iSta)%Q, stat=ierror)
+    DEALLOCATE(SPD(iSta)%H, SPD(iSta)%M, SPD(iSta)%N, SPD(iSta)%Q, stat=ierror)
+enddo
+
+!/// destroy handles of cuBLAS and cuSPARSE, release buffer zone ///!
+DEALLOCATE(bufferSparseMatrixDenseVector, stat=ierror)
+status = cublasDestroy(cublasH)
+status = cusparseDestroy(cusparseH)
+
+!/// destroy cuda events for timing ///!
+ierror = cudaEventDestroy(startEvent)
+ierror = cudaEventDestroy(stopEvent)
+
+end subroutine releaseDeviceMemory

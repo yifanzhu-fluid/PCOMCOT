@@ -1,0 +1,373 @@
+module VariableDefination
+
+use cudafor
+use cublas_v2
+use cusparse
+
+!/// Global Parameters for Floating-Point Precision ///!
+#ifdef DOUBLE
+integer*4, parameter        ::  fp_kind = SELECTED_REAL_KIND(15,307)
+#else
+integer*4, parameter        ::  fp_kind = SELECTED_REAL_KIND(6,37)
+#endif
+integer*4, parameter        ::  sp_kind = SELECTED_REAL_KIND(6,37)
+real(fp_kind), parameter    ::  PCOMCOT_REAL_ONE = 1.0
+
+!/// CUDA event for estimating the time cost ///!
+type(cudaEvent) ::  startEvent, stopEvent
+
+!/// Handles of cuBLAS and cuSPARSE, and buffer zone for computation ///!
+type(cublasHandle)      ::  cublasH
+type(cusparseHandle)    ::  cusparseH
+integer*4, device, dimension(:), allocatable    ::  bufferSparseMatrixDenseVector
+
+!/// Kajiura' Green functions used in Kajiura filtering ///!
+real(fp_kind), parameter    ::  kajiuraGreenRmax = 6.0
+integer*4, parameter        ::  kajiuraGreenNInterpPoints = 601
+real(fp_kind), device       ::  kajiuraGreenR(kajiuraGreenNInterpPoints), kajiuraGreenD(kajiuraGreenNInterpPoints)
+
+
+
+type :: HostGlobalParameters
+
+    !****************************** Read From Config ******************************!
+    !/// Basic Control Parmeters ///!
+    real(fp_kind)   ::  Version = 2.0          ! pcomcot version
+    integer*4       ::  PurposeCalculation     ! 1/Regular Simulation; 2,3/Compute Green Functions of (Subfaults/Initial Height)
+    integer*4       ::  InitialConditionType   ! Initial condition  0/file; 1/fault
+    integer*4       ::  CoordinatesType        ! 0/spherical; 1/cartisian
+    real(fp_kind)   ::  TotalTime              ! Total run time
+    real(fp_kind)   ::  dt                     ! Time step
+    real(fp_kind)   ::  DTSaveData             ! Time interval to save snapshots
+    integer*4       ::  SaveFlux               ! 0/no; 1/save flux
+    integer*4       ::  SaveDynamicPressure    ! 0/no; 1/save dynamic pressure Q
+    integer*4       ::  MinGridsPerNode        ! Min grids on each computing node, meaningless for GPU version
+    integer*4       ::  FeedbackToParentLayer  ! 0/no feedback; 1/yes
+
+    !/// Parameters for Tsunami Source ///!
+    integer*4       ::  HorizontalMotion        ! 0/only vertical displacement; 1/consider horizontal motion using Tanioka (1996)
+    integer*4       ::  KajiuraFilter           ! 0/no Kajiura filtering; 1/determine surface elevation based on Kajiura' theory (1963)
+    integer*4       ::  UseAverageDepth         ! 0/use local water depth for Kajiura filtering; 1/use average depth of source area
+    real(fp_kind)   ::  MinKajiuraDepth         ! Minimum water depth for applying Kajiura filter
+    real(fp_kind)   ::  MaxBottomSlope = 0.2    ! Maximum bottom slope allowed by the model
+
+    !/// Parameters for Wave Physics and Numerics ///!
+    integer*4       ::  Nonlinearity                ! 0/linear waves; 1/nonlinear waves
+    integer*4       ::  Dispersion                  ! 0/non-dispersive waves; 1/dispersive waves
+    integer*4       ::  DepthVariability            ! 0/smooth bottom; 1/relatively steep bottom
+    real(fp_kind)   ::  MinDispersionDepth          ! Minimum flow depth for calculating dynamic pressure
+    integer*4       ::  Breaking                    ! 0/non-breaking waves; 1/breaking waves
+    integer*4       ::  FluxCenter                  ! 0/TFSC scheme for LSWE; 1/use flux-centered scheme to improve stability
+    real(fp_kind)   ::  centerWeighting0 = 0.9995   ! center weighting for TFSC scheme
+    real(fp_kind)   ::  FrCap                       ! Upper bound of Froud number to avoid unreasonable velocity
+    real(fp_kind)   ::  DTFilterData                ! Time interval to filter out short wave components
+    integer*4       ::  NDTFilterData               ! Time step interval to apply 9-point filter to wave field
+    
+    !/// Parameters for Boundary Condition ///!
+    integer*4       ::  BoundaryConditionType  ! Boundary condition 0/open; 1/wall; 2/sponge **only wall and sponge are supported
+    real(fp_kind)   ::  SpongeWidthX           ! Width of sponge layer in x direction (unit: meter)
+    real(fp_kind)   ::  SpongeWidthY           ! Width of sponge layer in y direction (unit: meter)
+    real(fp_kind)   ::  MaxSpongeMANNING       ! Maximum Manning coefficient for friction-type sponge
+    real(fp_kind)   ::  SpongeDampingA         ! Damping coefficient A for L-D type sponge
+    real(fp_kind)   ::  SpongeDampingR         ! Damping coefficient R for L-D type sponge
+
+    !/// Parameters for Inundation ///!
+    real(fp_kind)   ::  PermanentDryLimit      ! Considered to be permanently dry if ground elevation is no less than this
+    real(fp_kind)   ::  MinWaterDepth          ! Wet cells turn into dry, if total depth is no more than this
+    real(fp_kind)   ::  FrictionDepthLimit     ! Bottom friction is not calculated for too shallow area to avoid instability
+    real(fp_kind)   ::  MANNING                ! Manning coefficient for bottom friction
+
+    !/// Parameters for Green Functions ///!
+    real(fp_kind)   ::  SourceStartX, SourceEndX, SourceDX  ! Starting/Ending/GridSize X for Source Area
+    real(fp_kind)   ::  SourceStartY, SourceEndY, SourceDY  ! Starting/Ending/GridSize Y for Source Area
+    integer*4       ::  SourceBasisFunctionType             ! 1/Gaussian; 2/Sigmoid Function 1/(1+exp(-x+x_left))+1/(1+exp(x-x_right))-1
+    real(fp_kind)   ::  GaussianRatio                       ! Ratio of Gaussian Radius v.s. Source Grids Size
+    real(fp_kind)   ::  SigmoidCoefficient                  ! epsilon coefficient for sigmoid function to approximate step function
+    
+    !************************* Computed for Convinience **************************!
+    integer*4         ::  NumLayers                  ! Value set in "checkFiles"
+    character(999)    ::  InitialElevationFileName   ! Value set in "checkFiles"
+    integer*4         ::  InitialElevationFileFormat ! Value set in "checkFiles" 1/nf; 2/xyz
+    integer*4         ::  StartEastWest              ! Vaule set in "getBathymetryDataSize";
+                                                     ! 0/Cartisian; 1/spherical long:160E~-160W(200E); 2/special long: 340W(-20E)~20E
+    integer*4         ::  NumLayerLevels             ! Value set in "determineLayerDependency"
+    integer*4         ::  TopLayer                   ! Value set in "determineLayerDependency"
+    integer*4         ::  NumStations                ! Value set in "readStations"
+    integer*4         ::  NumFaults                  ! Value set in "readFaultParameters"
+    integer*4         ::  TotalTimeSteps             ! Value set in "computeGlobalParameters"
+    integer*4         ::  NDTSaveData                ! Value set in "computeGlobalParameters"
+    integer*4         ::  nCalculations              ! Value set in "computeGlobalParameters"
+    integer*4         ::  SourceNX, SourceNY         ! Value set in "computeGlobalParaemters"
+    real(fp_kind), dimension(:), pointer    ::  t    ! Value set when solving equations
+
+    !************************* Default System Parameters *************************!
+    character(999)  ::  COMCOTParametersFileName  = "pcomcot.ctl"
+    character(999)  ::  COMCOTLayerCtlFileName  = "layers.ctl"
+    character(999)  ::  BathymetryFilePrefix = "layer"                      ! Bathymetry: .nf/.xyz
+    character(999)  ::  InitialElevationFilePrefix = "InitialElevation"     ! Initial elevation: .nf/.xyz
+    character(999)  ::  InitialMFileName = 'InitialFluxM.xyz'               ! Initial flux M(optional)
+    character(999)  ::  InitialNFileName = 'InitialFluxN.xyz'               ! Initial flux N(optional)
+    character(999)  ::  FaultParametersFileName = "FaultParameters.ctl"     ! Fault parameters
+    character(999)  ::  StationFileName = "Stations.ctl"                    ! File for stations coordinates
+    character(999)  ::  GFParamFileName = "InitialElevationGFParameters.dat"! File for initial height GF parameters
+    character(999)  ::  GFParamFormatFileName = "InitialElevationGFParametersFormat.txt"
+    character(999)  ::  ResultPath = 'PCOMCOToutput/'           ! Directory of all output files
+    integer*4       ::  nGHOST = 4                              ! Outermost 4 grid points of child layer are interpolated from parent
+    integer*4       ::  nRowBathymetry = 3                      ! At least 3 cells are wet, smoothing bathymetry
+    integer*4       ::  nRowBathymetryBoundary = 10             ! At least 10 cells are wet from boundary
+    real(fp_kind)   ::  GRAV = 9.807                            ! Gravitational acceleration
+    real(fp_kind)   ::  PI = 3.141593                           ! Constant Pi
+    real(fp_kind)   ::  R_EARTH = 6378.0E3                      ! Earth Radius                              
+    real(fp_kind)   ::  OMEGA = 7.292116E-5                     ! Angular velocity of Earth's rotation
+
+    !****************************** GPU Kernel Execution Parameters ******************************!
+    type(cudaDeviceProp)    ::  Prop                            ! Properties of CUDA device
+    integer*4               ::  BlockDimX = 32, BlockDimY = 8   ! Block Dimensions for launching kernels
+    real(fp_kind)           ::  CPUTimeInitial              ! Value set in "pcomcot"
+    real(fp_kind)           ::  CPUTimeInitialCalculation   ! Value set in "pcomcot"
+    real(fp_kind)           ::  Timer(5)                    ! Value set in all subroutines; Total/Prepare/Calculation/CPU-GPU Communication/WriteToDisk
+
+end type HostGlobalParameters
+
+
+
+type :: DeviceGlobalParameters
+
+    !/// Basic Control Parmeters ///!
+    integer*4       ::  PurposeCalculation     ! 1/Regular Simulation; 2,3/Compute Green Functions of (Subfaults/Initial Height)
+    integer*4       ::  InitialConditionType   ! Initial condition  0/file; 1/fault
+    integer*4       ::  CoordinatesType        ! 0/spherical; 1/cartisian
+    real(fp_kind)   ::  TotalTime              ! Total run time
+    real(fp_kind)   ::  dt                     ! Time step
+    real(fp_kind)   ::  DTSaveData             ! Time interval to save snapshots
+    integer*4       ::  SaveFlux               ! 0/no; 1/save flux
+    integer*4       ::  SaveDynamicPressure    ! 0/no; 1/save dynamic pressure Q
+    integer*4       ::  MinGridsPerNode        ! Min grids on each computing node, meaningless for GPU version
+    integer*4       ::  FeedbackToParentLayer  ! 0/no feedback; 1/yes
+
+    !/// Parameters for Tsunami Source ///!
+    integer*4       ::  HorizontalMotion    ! 0/only vertical displacement; 1/consider horizontal motion using Tanioka (1996)
+    integer*4       ::  KajiuraFilter       ! 0/no Kajiura filtering; 1/determine surface elevation based on Kajiura' theory (1963)
+    integer*4       ::  UseAverageDepth     ! 0/use local water depth for Kajiura filtering; 1/use average depth of source area
+    real(fp_kind)   ::  MinKajiuraDepth     ! Minimum water depth for applying Kajiura filter
+    real(fp_kind)   ::  MaxBottomSlope      ! Maximum bottom slope allowed by the model
+
+    !/// Parameters for Wave Physics and Numerics ///!
+    integer*4       ::  Nonlinearity        ! 0/linear waves; 1/nonlinear waves
+    integer*4       ::  Dispersion          ! 0/non-dispersive waves; 1/dispersive waves
+    integer*4       ::  DepthVariability    ! 0/smooth bottom; 1/relatively steep bottom
+    real(fp_kind)   ::  MinDispersionDepth  ! Minimum flow depth for calculating dynamic pressure
+    integer*4       ::  Breaking            ! 0/non-breaking waves; 1/breaking waves
+    integer*4       ::  FluxCenter          ! 0/TFSC scheme for LSWE; 1/use flux-centered scheme to improve stability
+    real(fp_kind)   ::  centerWeighting0    ! center weighting for TFSC scheme
+    real(fp_kind)   ::  FrCap               ! Upper bound of Froud number to avoid unreasonable velocity
+
+    !/// Parameters for Boundary Condition ///!
+    integer*4       ::  BoundaryConditionType  ! Boundary condition 0/open; 1/wall; 2/sponge **only wall and sponge are supported
+    real(fp_kind)   ::  SpongeWidthX           ! Width of sponge layer in x direction (unit: meter)
+    real(fp_kind)   ::  SpongeWidthY           ! Width of sponge layer in y direction (unit: meter)
+    real(fp_kind)   ::  MaxSpongeMANNING       ! Maximum Manning coefficient for friction-type sponge
+    real(fp_kind)   ::  SpongeDampingA         ! Damping coefficient A for L-D type sponge
+    real(fp_kind)   ::  SpongeDampingR         ! Damping coefficient R for L-D type sponge
+
+    !/// Parameters for Inundation ///!
+    real(fp_kind)   ::  PermanentDryLimit      ! Considered to be permanently dry if ground elevation is no less than this
+    real(fp_kind)   ::  MinWaterDepth          ! Wet cells turn into dry, if total depth is no more than this
+    real(fp_kind)   ::  FrictionDepthLimit     ! Bottom friction is not calculated for too shallow area to avoid instability
+    real(fp_kind)   ::  MANNING                ! Manning coefficient for bottom friction
+
+    !/// Parameters for Green Functions ///!
+    real(fp_kind)   ::  SourceStartX, SourceEndX, SourceDX  ! Starting/Ending/GridSize X for Source Area
+    real(fp_kind)   ::  SourceStartY, SourceEndY, SourceDY  ! Starting/Ending/GridSize Y for Source Area
+    integer*4       ::  SourceBasisFunctionType             ! 1/Gaussian; 2/Sigmoid Function 1/(1+exp(-x+x_left))+1/(1+exp(x-x_right))-1
+    real(fp_kind)   ::  GaussianRatio                       ! Ratio of Gaussian Radius v.s. Source Grids Size
+    real(fp_kind)   ::  SigmoidCoefficient                  ! epsilon coefficient for sigmoid function to approximate step function
+
+    !/// Parameters for nested layers ///!
+    integer*4       ::  NumStations
+    integer*4       ::  NumLayers
+    integer*4       ::  NumLayerLevels
+    integer*4       ::  TopLayer               
+
+    !************************* Default System Parameters *************************!
+    integer*4       ::  nGHOST      ! Outermost 4 grid points of child layer are interpolated from parent
+    real(fp_kind)   ::  GRAV        ! Gravitational acceleration
+    real(fp_kind)   ::  PI          ! Constant PI
+    real(fp_kind)   ::  R_EARTH     ! Earth Radius                              
+    real(fp_kind)   ::  OMEGA       ! Angular velocity of Earth's rotation
+
+    !/// execution configuration ///!
+    integer*4       ::  BlockDimX, BlockDimY
+
+
+end type DeviceGlobalParameters
+
+
+
+type :: HostLayerParameters
+
+    integer*4       ::  Level                       ! Value set in "determineLayerDependency"
+    integer*4       ::  Parent                      ! Value set in "determineLayerDependency"
+    character(999)  ::  BathymetryFileName          ! Value set in "getBathymetryDataSize"
+    integer*4       ::  BathymetryFileFormat        ! Value set in "getBathymetryDataSize"
+    real(fp_kind)   ::  xmin, dx, xmax              ! Value set in "getBathymetryDataSize"
+    real(fp_kind)   ::  ymin, dy, ymax              ! Value set in "getBathymetryDataSize"
+    integer*4       ::  NX, NY                      ! Value set in "getBathymetryDataSize"
+    integer*4       ::  Nonlinearity                ! Value set in "readLayerConfig" 0/linear; 1/nonlinear
+    integer*4       ::  Dispersion                  ! Value set in "readLayerConfig" 0/non-dispersive; 1/dispersive
+    integer*4       ::  DepthVariability            ! Value set in "readLayerConfig" 0/smooth bottom; 1/steep bathymetry
+    integer*4       ::  Breaking                    ! Value set in "readLayerConfig" 0/non-breaking; 1/breaking
+    integer*4       ::  FluxCenter                  ! Value set in "readLayerConfig" 0/FTCS scheme for LSWE; 1/flux-centered scheme
+    integer*4       ::  NDTFilterData               ! Value set in "readLayerConfig" time step interval to apply filter
+    real(fp_kind)   ::  DTFilterData                ! Value set in "readLayerConfig" time interval to apply filter
+    real(fp_kind)   ::  ComputingStartTime          ! Value set in "readLayerConfig" skip this layer before this time
+    real(fp_kind), dimension(:), pointer    ::  X, Y    ! Value set in "readBathymetry"
+    real(fp_kind), dimension(:,:), pointer  ::  Z       ! Value set in "readBathymetry"
+    real(fp_kind)   ::  zmin, zmax                      ! Value set in "readBathymetry"
+    real(fp_kind)   ::  dt                              ! Value set in "cflCheck"
+    integer*4       ::  nStepsPerTimeStep               ! Value set in "cflCheck"
+    integer*4       ::  RecvFromParent(12,6)        ! Value set in "computeParentChildSendRecv"; Boundary Flag,H/M/N Flag,nstartx,nendx,nstarty,nendy
+                                                    ! nstart, nend are the indices of child layer grids receiving data from parent
+    integer*4       ::  SendToParent(4)             ! Value set in "computeParentChildSendRecv"; nstartx,nendx,nstarty,nendy
+                                                    ! nstart, nend are the indices of parent layer grids where the wave height is updated via feedback
+
+    !**** Output Variables ****!
+    real(fp_kind), dimension(:,:,:), pointer    ::  H           ! water elevation, value in last/this step; x; y position
+    real(fp_kind), dimension(:,:,:), pointer    ::  M           ! volume flux in x direction (h*u)
+    real(fp_kind), dimension(:,:,:), pointer    ::  N           ! volume flux in y direction (h*v)
+    real(fp_kind), dimension(:,:), pointer      ::  Hmax, Hmin  ! Maximum/Minimum surface elevation in this layer
+    real(fp_kind), dimension(:,:), pointer      ::  Q           ! Non-hydrostatic pressure
+    real(fp_kind), dimension(:,:), pointer      ::  PL, PR, PB, PT, PC, PQ   ! coefficients and forcing vector of linear equations for dynamic pressure
+
+end type HostLayerParameters
+
+
+
+type  ::  DeviceLayerParameters
+
+    integer*4       ::  Level                           ! Value set in "determineLayerDependency"
+    integer*4       ::  Parent                          ! Value set in "determineLayerDependency"
+    real(fp_kind)   ::  xmin, dx, xmax                  ! Value set in "getBathymetryDataSize"
+    real(fp_kind)   ::  ymin, dy, ymax                  ! Value set in "getBathymetryDataSize"
+    integer*4       ::  NX, NY                          ! Value set in "getBathymetryDataSize"
+    integer*4       ::  Nonlinearity                    ! Value set in "readLayerConfig" 0/linear; 1/nonlinear
+    integer*4       ::  Dispersion                      ! Value set in "readLayerConfig" 0/non-dispersive; 1/dispersive
+    integer*4       ::  DepthVariability                ! Value set in "readLayerConfig" 0/smooth bottom; 1/steep bathymetry
+    integer*4       ::  Breaking                        ! Value set in "readLayerConfig" 0/non-breaking; 1/breaking
+    integer*4       ::  FluxCenter                      ! Value set in "readLayerConfig" 0/FTCS scheme for LSWE; 1/flux-centered scheme
+    integer*4       ::  NDTFilterData                   ! Value set in "readLayerConfig" time step interval to apply filter
+    real(fp_kind)   ::  DTFilterData                    ! Value set in "readLayerConfig" time interval to apply filter
+    real(fp_kind)   ::  ComputingStartTime              ! Value set in "readLayerConfig" skip this layer before this moment
+    real(fp_kind), device, dimension(:), allocatable    ::  X, Y    ! Value set in "readBathymetry"
+    real(fp_kind), device, dimension(:,:), allocatable  ::  Z       ! Value set in "readBathymetry"
+    real(fp_kind)   ::  zmin, zmax                      ! Value set in "readBathymetry"
+    real(fp_kind)   ::  dt                              ! Value set in "cflCheck"
+    integer*4       ::  nStepsPerTimeStep               ! Value set in "cflCheck"
+
+    !**** Values Computed as Parameters in "computeConstantParameters" ****!
+    integer*4                                           ::  PermanentDryCellsCount  ! Number of permanently dry cells
+    integer*4                                           ::  FloodingCellsCount      ! Number of cells which man change between dry and wet (PDL<Z<-PDL)
+    real(fp_kind), device, dimension(:,:), allocatable  ::  SpongeMANNING           ! Manning coefficient of friction-type sponge layer
+    real(fp_kind), device, dimension(:), allocatable    ::  CPX, CPY                ! Coriolis parameters CP=2*Omega*SIN(Y)
+    real(fp_kind)                                       ::  CC1, CC2, CC3, CC4      ! coefficients for linear and nonlinear terms in Cartesian 
+    real(fp_kind), device, dimension(:), allocatable    ::  CSY, CS1, CS2, CS3      ! coefficients for linear terms in spherical 
+    real(fp_kind)                                       ::  CS4
+    real(fp_kind)                                       ::  CS5                     ! coefficients for nonlinear terms in spherical 
+    real(fp_kind), device, dimension(:), allocatable    ::  CS6, CS7, CS8           ! coefficients for nonlinear terms in spherical  
+
+    !**** Values Computed by Solving Equations  ****!
+    real(fp_kind), device, dimension(:,:,:), allocatable    ::  H   ! water elevation, value in last/this step; x; y position
+    real(fp_kind), device, dimension(:,:,:), allocatable    ::  M   ! volume flux in x direction (h*u)
+    real(fp_kind), device, dimension(:,:,:), allocatable    ::  N   ! volume flux in y direction (h*v)
+    real(fp_kind), device, dimension(:,:), allocatable      ::  D_M, D_N    ! numerical Depth where flux is defined
+    real(fp_kind), device, dimension(:,:), allocatable      ::  Hmax, Hmin  ! Maximum/Minimum surface elevation in this layer
+    real(fp_kind), device, dimension(:,:), allocatable      ::  H0, M0, N0  ! Initial H/M/N in each iTimeStep
+    real(fp_kind), device, dimension(:,:), allocatable      ::  HF, MF, NF  ! Final H/M/N in each iTimeStep (for child layer)
+    real(fp_kind), device, dimension(:,:), allocatable      ::  HK, HS          ! Surface elevation smoothed by Kajiura filter
+    real(fp_kind), device, dimension(:,:), allocatable      ::  Mtmp, Ntmp      ! temporary arrays to store M and N
+    integer*4, device, dimension(:,:), allocatable          ::  Sign_M, Sign_N  ! Allowed flow situations of M and N: 0, +1, -1, +2, -2, 999
+                                                                                ! 0: both directions are allowed; 999: cannot flow; 
+                                                                                ! +1: only positive and from higher to lower; +2: ~ from lower to higher
+                                                                                ! -1: only negative and from higher to lower; -2: ~ from lower to higher
+
+    !/// Variables for Calculating Dispersion ///!
+    !*** Values Computed as Parameters ***!
+    real(fp_kind)                                       ::  CCD1, CCD2, CCD3, CCD4  ! coefficients for constructing equations for q in cartesian coordinates
+    real(fp_kind), device, dimension(:), allocatable    ::  CSD1, CSD2, CSD3, CSD4  ! coefficients for constructing equations for q in spherical coordinates
+    real(fp_kind)                                       ::  CSD5
+
+    !*** Values Computed by Solving Equations for Dynamic Pressure ***! 
+    real(fp_kind), device, dimension(:,:), allocatable      ::  Q, Q0, QF   ! Dynamic pressure, needs nesting and synchronization
+    integer*4, device, dimension(:,:), allocatable          ::  Has_Q       ! 1: has dynamic pressure; 0: has no dynamic pressure
+    real(fp_kind), device, dimension(:,:,:), allocatable    ::  WB, WS      ! Vertical velocity at bottom and surface, dont need nesting or sync
+    real(fp_kind), device, dimension(:,:), allocatable      ::  PL, PR, PB, PT, PC, PQ   ! coefficients and forcing vector of linear equations for dynamic pressure
+    real(fp_kind), device, dimension(:,:), allocatable      ::  PCA, PCB    ! Variables used to calculate PL, PR, PB, PT, PC, PQ 
+
+    !*** Varables Used by Bi-CGSTAB Iterations ***!
+    integer*4, device, dimension(:), allocatable        ::  csrColIndA, csrRowPtrA !arrays of column indices and row offsets for CSR format
+    real(sp_kind), device, dimension(:), allocatable    ::  csrValA !array of non-zero coefficients for CSR format
+    real(sp_kind), device, dimension(:), allocatable    ::  vecB, vecX, vecR, vecRC0, vecV, vecP, vecS, vecT, vecSC, vecTC, vecY, vecZ, vecDInverse !dense vectors
+    type(cusparseSpMatDescr)    ::  sparseMatA !descriptors of sparse matrix
+    type(cusparseDnVecDescr)    ::  dnVecX, dnVecR, dnVecV, dnVecP, dnVecS, dnVecT, dnVecSC, dnVecTC, dnVecY, dnVecZ !descriptors of dense vectors
+
+
+    !/// Variables for eddy-visocity type of wave breaking ///!
+    real(fp_kind), device, dimension(:,:), allocatable  ::  BrkAge, BrkAge0, BrkAgeF
+    real(fp_kind), device, dimension(:,:), allocatable  ::  Brkv, Brkv_smooth, Brkv0, BrkvF
+    !*** Values Computed as Parameters ***!
+    real(fp_kind)                                       ::  CCB1, CCB2             ! coefficients for eddy viscosity terms in Cartesian
+    real(fp_kind), device, dimension(:), allocatable    ::  CSB1, CSB2, CSB3, CSB4 ! coefficients for eddy viscosity terms in Spherical
+       
+
+end type DeviceLayerParameters
+
+
+
+type :: HostStationParameters
+
+    real(fp_kind)   ::  X, Y    ! Value set in "readStations"; Stations coordinates
+    integer*4       ::  nLayer  ! Value set in "readStations"; In which layer is the station located
+    real(fp_kind), dimension(:), pointer    ::  H, M, N, Q  ! Wavefield variables at this station
+    
+end type HostStationParameters
+
+
+
+type :: DeviceStationParameters
+
+    real(fp_kind)   ::  X, Y    ! Value set in "readStations"; Stations coordinates
+    integer*4       ::  nLayer  ! Value set in "readStations"; In which layer is the station located
+    real(fp_kind), device, dimension(:), allocatable    ::  H, M, N, Q  ! Wavefield variables at this station
+    
+end type DeviceStationParameters
+
+
+
+type :: FaultParameters
+
+    real(fp_kind)   ::  T0          ! rupture starting time
+    integer*4       ::  NT          ! time step when rupture starts
+    real(fp_kind)   ::  Depth       ! focal depth
+    real(fp_kind)   ::  Length      ! length of fault plane
+    real(fp_kind)   ::  Width       ! width of fault plane
+    real(fp_kind)   ::  Slip        ! dislocation
+    real(fp_kind)   ::  Rake        ! rake
+    real(fp_kind)   ::  HSlip       ! horizontal dislocation     HSlip = Slip*cos(Rake)
+    real(fp_kind)   ::  PSlip       ! perpendicular dislocation  PSlip = Slip*sin(Rake)
+    real(fp_kind)   ::  Strike      ! strike
+    real(fp_kind)   ::  Dip         ! dip
+    real(fp_kind)   ::  Y0          ! epicenter(latitude)
+    real(fp_kind)   ::  X0          ! epicenter(longitude)
+
+end type FaultParameters
+
+
+
+
+
+
+
+
+
+
+end module VariableDefination
