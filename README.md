@@ -7,7 +7,8 @@ The main features of PCOMCOT include:
 2) Moving boundary technique for run-up and run-down;
 3) Eddy-viscosity scheme for wave breaking;
 4) One-way and two-way grid nesting for cross-scale tsunami modeling;
-5) Parallel implementation on both CPU and GPU.   
+5) Parallel implementation on both CPU and GPU.
+   
 We will keep updating the source code, manual, and examples when new features or modules are added.\
 To publish papers containing use of PCOMCOT or mentioning this model, please cite articles about the algorithms and applications of PCOMCOT.
 The articles on PCOMCOT are: 
