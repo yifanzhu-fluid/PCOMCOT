@@ -1,0 +1,630 @@
+module dispersion_kernels
+
+use VariableDefination
+
+contains
+
+attributes(global) subroutine computeBottomVerticalVelocity(GP, LP, iLayer)
+implicit NONE
+type(DeviceGlobalParameters)    ::  GP
+type(DeviceLayerParameters)     ::  LP(99)
+integer*4, value    ::  iLayer
+integer*4       ::  nstartx, nendx, nstarty, nendy
+real(fp_kind)   ::  m1, m2, n1, n2, z0, z1, z2, z3, z4, zl, zr, zb, zt
+real(fp_kind)   ::  D0, U0, V0
+integer*4       ::  i, j
+
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+
+!/// determine the computational domain ///
+if(LP(iLayer)%Level.eq.1) then
+    nstartx = 1; nendx = LP(iLayer)%NX
+    nstarty = 1; nendy = LP(iLayer)%NY
+else
+    nstartx = GP%nGHOST+1; nendx = LP(iLayer)%NX-GP%nGHOST
+    nstarty = GP%nGHOST+1; nendy = LP(iLayer)%NY-GP%nGHOST
+endif
+
+if(i.ge.nstartx.and.i.le.nendx.and.j.ge.nstarty.and.j.le.nendy) then
+
+    z0 = LP(iLayer)%Z(i,j)
+    D0 = LP(iLayer)%Z(i,j) + LP(iLayer)%H(2,i,j)
+    if(D0.le.GP%MinWaterDepth) then !exclude dry cells
+        LP(iLayer)%WB(2,i,j) = 0.0
+    else
+        !///calculate vertical velocity///!
+        U0 = 0.0; V0 = 0.0
+        if(i.ge.2) then
+            z1 = LP(iLayer)%Z(i-1,j); m1 = LP(iLayer)%M(1,i-1,j)   
+        else
+            z1 = z0; m1 = 0.0
+        endif
+        if(i.le.LP(iLayer)%NX-1) then
+            z2 = LP(iLayer)%Z(i+1,j); m2 = LP(iLayer)%M(1,i,j)   
+        else
+            z2 = z0; m2 = 0.0
+        endif
+        if(j.ge.2) then
+            z3 = LP(iLayer)%Z(i,j-1); n1 = LP(iLayer)%N(1,i,j-1)
+        else
+            z3 = z0; n1 = 0.0
+        endif
+        if(j.le.LP(iLayer)%NY-1) then
+            z4 = LP(iLayer)%Z(i,j+1); n2 = LP(iLayer)%N(1,i,j)
+        else
+            z4 = z0; n2 = 0.0
+        endif
+        U0 = 0.5*(m1+m2)/D0; V0 = 0.5*(n1+n2)/D0
+        !///upwind scheme for bottom slope///!
+        if(U0.ge.0.0) then
+            zl = z1; zr = z0
+        else
+            zl = z0; zr = z2
+        endif
+        if(V0.ge.0.0) then
+            zb = z3; zt = z0
+        else
+            zb = z0; zt = z4
+        endif
+        if(GP%CoordinatesType.eq.1) then
+            LP(iLayer)%WB(2,i,j) = -U0*LP(iLayer)%CCD3*(zr-zl) - V0*LP(iLayer)%CCD4*(zt-zb) 
+        elseif(GP%CoordinatesType.eq.0) then
+            LP(iLayer)%WB(2,i,j) = -U0*LP(iLayer)%CSD3(j)*(zr-zl) - V0*LP(iLayer)%CSD5*(zt-zb) 
+        endif
+    endif
+
+endif
+
+end subroutine computeBottomVerticalVelocity
+
+
+
+attributes(global) subroutine preparePressureEquationConstruction(GP, LP, iLayer)
+implicit NONE
+type(DeviceGlobalParameters)    ::  GP
+type(DeviceLayerParameters)     ::  LP(99)
+integer*4, value                ::  iLayer
+real(fp_kind)   ::  h1, h2, z1, z2, D, beta
+integer*4       ::  i, j
+
+!/// use different alpha and beta for slowly and rapidly varying bathymetry ///!
+if(LP(iLayer)%DepthVariability.eq.0) then
+    beta = 0.5
+else
+    beta = 1.0
+endif
+
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+
+if(i.le.LP(iLayer)%NX.and.j.le.LP(iLayer)%NY) then
+
+    !/// check if non-hydrostatic pressure at this cell should be zero ///! 
+    if(LP(iLayer)%Level.eq.1.and.(i.eq.1.or.i.eq.LP(iLayer)%NX.or.j.eq.1.or.j.eq.LP(iLayer)%NY)) then !pressure on the boundary of top layer is zero
+        LP(iLayer)%Has_Q(i,j) = 0     
+    elseif(LP(iLayer)%Z(i,j)+LP(iLayer)%H(2,i,j).le.GP%MinDispersionDepth) then !pressure in too shallow area or on wet-dry boundary is zero 
+        LP(iLayer)%Has_Q(i,j) = 0
+    elseif(i.ge.2.and.(LP(iLayer)%D_M(i-1,j).le.GP%MinDispersionDepth.or.LP(iLayer)%Sign_M(i-1,j).ne.0)) then
+        LP(iLayer)%Has_Q(i,j) = 0
+    elseif(i.le.LP(iLayer)%NX-1.and.(LP(iLayer)%D_M(i,j).le.GP%MinDispersionDepth.or.LP(iLayer)%Sign_M(i,j).ne.0)) then
+        LP(iLayer)%Has_Q(i,j) = 0
+    elseif(j.ge.2.and.(LP(iLayer)%D_N(i,j-1).le.GP%MinDispersionDepth.or.LP(iLayer)%Sign_N(i,j-1).ne.0)) then
+        LP(iLayer)%Has_Q(i,j) = 0
+    elseif(j.le.LP(iLayer)%NY-1.and.(LP(iLayer)%D_N(i,j).le.GP%MinDispersionDepth.or.LP(iLayer)%Sign_N(i,j).ne.0)) then
+        LP(iLayer)%Has_Q(i,j) = 0
+    else
+        LP(iLayer)%Has_Q(i,j) = 1
+    endif
+
+    !/// calculate coefficients A ///!
+    if(i.le.LP(iLayer)%NX-1) then
+        if(LP(iLayer)%Sign_M(i,j).ne.0.or.LP(iLayer)%D_M(i,j).le.GP%MinDispersionDepth) then
+            LP(iLayer)%PCA(i,j) = 0.0
+        else
+            D  = LP(iLayer)%D_M(i,j)
+            h1 = LP(iLayer)%H(2,i,j); h2 = LP(iLayer)%H(2,i+1,j)
+            z1 = LP(iLayer)%Z(i,j);   z2 = LP(iLayer)%Z(i+1,j) 
+            LP(iLayer)%PCA(i,j) = ((h2-beta*z2)-(h1-beta*z1))/D
+        endif
+    endif
+
+    !/// calculate coefficients B ///!
+    if(j.le.LP(iLayer)%NY-1) then
+        if(LP(iLayer)%Sign_N(i,j).ne.0.or.LP(iLayer)%D_N(i,j).le.GP%MinDispersionDepth) then
+            LP(iLayer)%PCB(i,j) = 0.0
+        else
+            D  = LP(iLayer)%D_N(i,j)
+            h1 = LP(iLayer)%H(2,i,j); h2 = LP(iLayer)%H(2,i,j+1)
+            z1 = LP(iLayer)%Z(i,j);   z2 = LP(iLayer)%Z(i,j+1)
+            LP(iLayer)%PCB(i,j) = ((h2-beta*z2)-(h1-beta*z1))/D
+        endif
+    endif
+
+endif
+
+end subroutine preparePressureEquationConstruction
+
+
+
+attributes(global) subroutine constructDynamicPressureEquations(GP, LP, iLayer)
+implicit NONE
+type(DeviceGlobalParameters)    ::  GP
+type(DeviceLayerParameters)     ::  LP(99)
+integer*4, value                ::  iLayer
+real(fp_kind)   ::  D, u1, u2, v1, v2, ws1, wb1, wb2
+real(fp_kind)   ::  csy1, csy2, alpha
+integer*4       ::  i, j
+
+!/// use different alpha and beta for slowly and rapidly varying bathymetry ///!
+if(LP(iLayer)%DepthVariability.eq.0) then
+    alpha = 2.0/3.0
+else
+    alpha = 0.5
+endif
+
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+
+if(i.le.LP(iLayer)%NX.and.j.le.LP(iLayer)%NY) then
+
+    if(LP(iLayer)%Has_Q(i,j).eq.0) then !Q is forced to be zero (boundary of top layer, some inner cells)
+        LP(iLayer)%PL(i,j) = 0.0; LP(iLayer)%PR(i,j) = 0.0
+        LP(iLayer)%PB(i,j) = 0.0; LP(iLayer)%PT(i,j) = 0.0
+        LP(iLayer)%PC(i,j) = 1.0; LP(iLayer)%PQ(i,j) = 0.0
+    elseif(LP(iLayer)%Level.gt.1.and.(i.le.GP%nGHOST.or.i.ge.LP(iLayer)%NX-GP%nGHOST+1 &
+            .or.j.le.GP%nGHOST.or.j.ge.LP(iLayer)%NY-GP%nGHOST+1)) then !Q is forced to be the value interpolated from parent layer
+        LP(iLayer)%PL(i,j) = 0.0; LP(iLayer)%PR(i,j) = 0.0                
+        LP(iLayer)%PB(i,j) = 0.0; LP(iLayer)%PT(i,j) = 0.0
+        LP(iLayer)%PC(i,j) = 1.0; LP(iLayer)%PQ(i,j) = LP(iLayer)%Q(i,j)
+    else
+        D = LP(iLayer)%H(2,i,j) + LP(iLayer)%Z(i,j)
+        u1 = LP(iLayer)%M(2,i-1,j)/LP(iLayer)%D_M(i-1,j); u2 = LP(iLayer)%M(2,i,j)/LP(iLayer)%D_M(i,j)
+        v1 = LP(iLayer)%N(2,i,j-1)/LP(iLayer)%D_N(i,j-1); v2 = LP(iLayer)%N(2,i,j)/LP(iLayer)%D_N(i,j)
+        ws1 = LP(iLayer)%WS(1,i,j); wb1 = LP(iLayer)%WB(1,i,j); wb2 = LP(iLayer)%WB(2,i,j)
+        if(GP%CoordinatesType.eq.1) then
+            LP(iLayer)%PL(i,j) = alpha*LP(iLayer)%CCD1*(-1+0.5*LP(iLayer)%PCA(i-1,j))
+            LP(iLayer)%PR(i,j) = alpha*LP(iLayer)%CCD1*(-1-0.5*LP(iLayer)%PCA(i,j))
+            LP(iLayer)%PB(i,j) = alpha*LP(iLayer)%CCD2*(-1+0.5*LP(iLayer)%PCB(i,j-1))
+            LP(iLayer)%PT(i,j) = alpha*LP(iLayer)%CCD2*(-1-0.5*LP(iLayer)%PCB(i,j))
+            LP(iLayer)%PC(i,j) = alpha*LP(iLayer)%CCD1*(1+0.5*LP(iLayer)%PCA(i-1,j)+1-0.5*LP(iLayer)%PCA(i,j)) + &
+                alpha*LP(iLayer)%CCD2*(1+0.5*LP(iLayer)%PCB(i,j-1)+1-0.5*LP(iLayer)%PCB(i,j)) + 2.0*LP(iLayer)%dt/D**2
+            LP(iLayer)%PQ(i,j) = -LP(iLayer)%CCD3*(u2-u1) - LP(iLayer)%CCD4*(v2-v1) - (ws1+wb1-2.0*wb2)/D
+        elseif(GP%CoordinatesType.eq.0) then
+            csy1 = LP(iLayer)%CSY(j-1); csy2 = LP(iLayer)%CSY(j)
+            LP(iLayer)%PL(i,j) = alpha*LP(iLayer)%CSD1(j)*(-1+0.5*LP(iLayer)%PCA(i-1,j))
+            LP(iLayer)%PR(i,j) = alpha*LP(iLayer)%CSD1(j)*(-1-0.5*LP(iLayer)%PCA(i,j))
+            LP(iLayer)%PB(i,j) = alpha*LP(iLayer)%CSD2(j)*(-1+0.5*LP(iLayer)%PCB(i,j-1))*csy1
+            LP(iLayer)%PT(i,j) = alpha*LP(iLayer)%CSD2(j)*(-1-0.5*LP(iLayer)%PCB(i,j))*csy2
+            LP(iLayer)%PC(i,j) = alpha*LP(iLayer)%CSD1(j)*(1+0.5*LP(iLayer)%PCA(i-1,j)+1-0.5*LP(iLayer)%PCA(i,j)) + &
+                alpha*LP(iLayer)%CSD2(j)*((1+0.5*LP(iLayer)%PCB(i,j-1))*csy1+(1-0.5*LP(iLayer)%PCB(i,j))*csy2) + 2.0*LP(iLayer)%dt/D**2
+            LP(iLayer)%PQ(i,j) = -LP(iLayer)%CSD3(j)*(u2-u1) - LP(iLayer)%CSD4(j)*(v2*csy2-v1*csy1) - (ws1+wb1-2.0*wb2)/D
+        endif
+    endif
+
+endif
+
+end subroutine constructDynamicPressureEquations
+
+
+
+attributes(global) subroutine correctSWEWithDynamicPressure(GP, LP, iLayer)
+implicit NONE
+type(DeviceGlobalParameters)    ::  GP
+type(DeviceLayerParameters)     ::  LP(99)
+integer*4, value                ::  iLayer
+real(fp_kind)   ::  alpha, beta
+real(fp_kind)   ::  q1, q2, h1, h2, z1, z2
+integer*4       ::  nstartx, nendx, nstarty, nendy
+integer*4       ::  i, j
+
+!/// use different alpha and beta for slowly and rapidly varying bathymetry ///!
+if(LP(iLayer)%DepthVariability.eq.0) then
+    alpha = 2.0/3.0; beta = 0.5
+else
+    alpha = 0.5; beta = 1.0
+endif
+
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+
+!/// calculate dispersive flux component M ///!
+if(LP(iLayer)%Level.eq.1) then
+    nstartx = 1; nendx = LP(iLayer)%NX-1
+    nstarty = 1; nendy = LP(iLayer)%NY
+else
+    nstartx = GP%nGHOST+1; nendx = LP(iLayer)%NX-GP%nGHOST-1
+    nstarty = GP%nGHOST+1; nendy = LP(iLayer)%NY-GP%nGHOST
+endif
+if(i.ge.nstartx.and.i.le.nendx.and.j.ge.nstarty.and.j.le.nendy) then
+    if(LP(iLayer)%Sign_M(i,j).eq.0) then !add Q only to cells where water can flow freely
+        q1 = LP(iLayer)%Q(i,j);   q2 = LP(iLayer)%Q(i+1,j)
+        h1 = LP(iLayer)%H(2,i,j); h2 = LP(iLayer)%H(2,i+1,j)
+        z1 = LP(iLayer)%Z(i,j);   z2 = LP(iLayer)%Z(i+1,j)
+        if(GP%CoordinatesType.eq.1) then
+            LP(iLayer)%M(2,i,j) = LP(iLayer)%M(2,i,j) - alpha*LP(iLayer)%CC1*LP(iLayer)%D_M(i,j)*(q2-q1) &
+                -0.5*alpha*LP(iLayer)%CC1*(q1+q2)*((h2-beta*z2)-(h1-beta*z1))
+        elseif(GP%CoordinatesType.eq.0) then
+            LP(iLayer)%M(2,i,j) = LP(iLayer)%M(2,i,j) - alpha*LP(iLayer)%CS1(j)*LP(iLayer)%D_M(i,j)*(q2-q1) &
+                -0.5*alpha*LP(iLayer)%CS1(j)*(q1+q2)*((h2-beta*z2)-(h1-beta*z1))
+        endif
+    endif
+endif
+
+!/// calculate dispersive flux component N ///!
+if(LP(iLayer)%Level.eq.1) then
+    nstartx = 1; nendx = LP(iLayer)%NX
+    nstarty = 1; nendy = LP(iLayer)%NY-1
+else
+    nstartx = GP%nGHOST+1; nendx = LP(iLayer)%NX-GP%nGHOST
+    nstarty = GP%nGHOST+1; nendy = LP(iLayer)%NY-GP%nGHOST-1
+endif
+if(i.ge.nstartx.and.i.le.nendx.and.j.ge.nstarty.and.j.le.nendy) then
+    if(LP(iLayer)%Sign_N(i,j).eq.0) then !add Q only to cells where water can flow freely
+        q1 = LP(iLayer)%Q(i,j);   q2 = LP(iLayer)%Q(i,j+1)
+        h1 = LP(iLayer)%H(2,i,j); h2 = LP(iLayer)%H(2,i,j+1)
+        z1 = LP(iLayer)%Z(i,j);   z2 = LP(iLayer)%Z(i,j+1)
+        if(GP%CoordinatesType.eq.1) then
+            LP(iLayer)%N(2,i,j) = LP(iLayer)%N(2,i,j) - alpha*LP(iLayer)%CC2*LP(iLayer)%D_N(i,j)*(q2-q1) &
+                -0.5*alpha*LP(iLayer)%CC2*(q1+q2)*((h2-beta*z2)-(h1-beta*z1))
+        elseif(GP%CoordinatesType.eq.0) then
+            LP(iLayer)%N(2,i,j) = LP(iLayer)%N(2,i,j) - alpha*LP(iLayer)%CS5*LP(iLayer)%D_N(i,j)*(q2-q1) &
+                -0.5*alpha*LP(iLayer)%CS5*(q1+q2)*((h2-beta*z2)-(h1-beta*z1))
+        endif
+    endif
+endif
+
+end subroutine correctSWEWithDynamicPressure
+
+
+
+attributes(global) subroutine computeSurfaceVerticalVelocityWithPressure(GP, LP, iLayer)
+implicit NONE
+type(DeviceGlobalParameters)    ::  GP
+type(DeviceLayerParameters)     ::  LP(99)
+integer*4, value                ::  iLayer
+real(fp_kind)   ::  D0
+integer*4       ::  nstartx, nendx, nstarty, nendy
+integer*4       ::  i, j
+
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+
+!/// determine the computational domain ///!
+if(LP(iLayer)%Level.eq.1) then
+    nstartx = 1; nendx = LP(iLayer)%NX
+    nstarty = 1; nendy = LP(iLayer)%NY
+else
+    nstartx = GP%nGHOST+1; nendx = LP(iLayer)%NX-GP%nGHOST
+    nstarty = GP%nGHOST+1; nendy = LP(iLayer)%NY-GP%nGHOST
+endif
+
+if(i.ge.nstartx.and.i.le.nendx.and.j.ge.nstarty.and.j.le.nendy) then
+
+    if(LP(iLayer)%Z(i,j).le.-GP%PermanentDryLimit) then
+        LP(iLayer)%WS(2,i,j) = 0.0
+    else
+        D0 = LP(iLayer)%Z(i,j) + LP(iLayer)%H(2,i,j)
+        if(D0.le.0.0) then
+            LP(iLayer)%WS(2,i,j) = 0.0
+        else
+            LP(iLayer)%WS(2,i,j) = LP(iLayer)%WS(1,i,j) + LP(iLayer)%WB(1,i,j) - LP(iLayer)%WB(2,i,j)
+            if(D0.gt.GP%MinDispersionDepth) LP(iLayer)%WS(2,i,j) = LP(iLayer)%WS(2,i,j) + 2.0*LP(iLayer)%dt*LP(iLayer)%Q(i,j)/D0
+        endif
+    endif
+
+endif
+
+end subroutine computeSurfaceVerticalVelocityWithPressure
+
+
+
+attributes(global) subroutine computeSurfaceVerticalVelocityWithoutPressure(GP, LP, iLayer)
+implicit NONE
+type(DeviceGlobalParameters)    ::  GP
+type(DeviceLayerParameters)     ::  LP(99)
+integer*4, value                ::  iLayer
+real(fp_kind)   ::  D0, DM1, DM2, DN1, DN2
+real(fp_kind)   ::  m1, m2, n1, n2, u1, u2, v1, v2
+real(fp_kind)   ::  csy1, csy2 
+integer*4       ::  nstartx, nendx, nstarty, nendy
+integer*4       ::  i, j
+
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+
+!/// determine the computational domain ///!
+if(LP(iLayer)%Level.eq.1) then
+    nstartx = 1; nendx = LP(iLayer)%NX
+    nstarty = 1; nendy = LP(iLayer)%NY
+else
+    nstartx = GP%nGHOST+1; nendx = LP(iLayer)%NX-GP%nGHOST
+    nstarty = GP%nGHOST+1; nendy = LP(iLayer)%NY-GP%nGHOST
+endif
+
+if(i.ge.nstartx.and.i.le.nendx.and.j.ge.nstarty.and.j.le.nendy) then
+
+    D0 = LP(iLayer)%Z(i,j) + LP(iLayer)%H(2,i,j)
+    if(D0.le.0.0) then
+        LP(iLayer)%WS(2,i,j) = 0.0
+    else
+        u1 = 0.0; u2 = 0.0
+        v1 = 0.0; v2 = 0.0
+        if(i.ge.2) then
+            m1 = LP(iLayer)%M(2,i-1,j); DM1 = LP(iLayer)%D_M(i-1,j)
+        else
+            m1 = 0.0; DM1 = D0
+        endif
+        if(i.le.LP(iLayer)%NX-1) then
+            m2 = LP(iLayer)%M(2,i,j); DM2 = LP(iLayer)%D_M(i,j)
+        else
+            m2 = 0.0; DM2 = D0
+        endif
+        if(j.ge.2) then
+            n1 = LP(iLayer)%N(2,i,j-1); DN1 = LP(iLayer)%D_N(i,j-1)
+        else
+            n1 = 0.0; DN1 = D0
+        endif
+        if(j.le.LP(iLayer)%NY-1) then
+            n2 = LP(iLayer)%N(2,i,j); DN2 = LP(iLayer)%D_N(i,j)
+        else
+            n2 = 0.0; DN2 = D0
+        endif
+        if(DM1.gt.GP%MinWaterDepth) u1 = m1/DM1; if(DM2.gt.GP%MinWaterDepth) u2 = m2/DM2
+        if(DN1.gt.GP%MinWaterDepth) v1 = n1/DN1; if(DN2.gt.GP%MinWaterDepth) v2 = n2/DN2
+        
+        if(GP%CoordinatesType.eq.1) then
+            LP(iLayer)%WS(2,i,j) = LP(iLayer)%WB(2,i,j) - D0*(LP(iLayer)%CCD3*(u2-u1)+LP(iLayer)%CCD4*(v2-v1))
+        elseif(GP%CoordinatesType.eq.0) then
+            if(j.ge.2) then
+                csy1 = LP(iLayer)%CSY(j-1)
+            else
+                csy1 = COS((LP(iLayer)%ymin-0.5*LP(iLayer)%dy)*GP%PI/180.0)
+            endif
+            if(j.le.LP(iLayer)%NY-1) then
+                csy2 = LP(iLayer)%CSY(j)
+            else
+                csy2 = COS((LP(iLayer)%ymax+0.5*LP(iLayer)%dy)*GP%PI/180.0)
+            endif
+            LP(iLayer)%WS(2,i,j) = LP(iLayer)%WB(2,i,j) - D0*(LP(iLayer)%CSD3(j)*(u2-u1)+LP(iLayer)%CSD4(j)*(v2*csy2-v1*csy1))
+        endif
+    endif
+
+endif
+
+end subroutine computeSurfaceVerticalVelocityWithoutPressure
+
+
+
+attributes(global) subroutine assemblePoissonMatrixVector(LP, iLayer, dmin)
+implicit NONE
+type(DeviceLayerParameters) ::  LP(99)
+integer*4, value            ::  iLayer
+real(sp_kind), value        ::  dmin
+real(sp_kind)   ::  d_element
+integer*4       ::  k, nz_before
+integer*4       ::  i, j 
+    
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+    
+if(i.le.LP(iLayer)%NX.and.j.le.LP(iLayer)%NY) then
+    
+    k = (j-1)*LP(iLayer)%NX + i
+    #ifdef DOUBLE
+        LP(iLayer)%vecB(k) = REAL(LP(iLayer)%PQ(i,j),sp_kind)
+        LP(iLayer)%vecX(k) = REAL(LP(iLayer)%Q(i,j),sp_kind)
+    #else
+        LP(iLayer)%vecB(k) = LP(iLayer)%PQ(i,j)
+        LP(iLayer)%vecX(k) = LP(iLayer)%Q(i,j)
+    #endif
+    
+    if(j.gt.1) then
+        nz_before = (j-2)*(5*(LP(iLayer)%NX-2)+2) + LP(iLayer)%NX
+    else
+        nz_before = 0
+    endif
+    if(j.gt.1.and.j.lt.LP(iLayer)%NY) then
+        nz_before = nz_before + MAX(5*(i-2)+1,0) 
+    else
+        nz_before = nz_before + i-1
+    endif
+    !/// put coefficients into a sparse matrix in CSR (Compressed Sparse Row) format ///!
+    if(i.gt.1.and.i.lt.LP(iLayer)%NX.and.j.gt.1.and.j.lt.LP(iLayer)%NY) then
+        #ifdef DOUBLE
+            LP(iLayer)%csrValA(nz_before+1) = REAL(LP(iLayer)%PB(i,j),sp_kind)
+            LP(iLayer)%csrValA(nz_before+2) = REAL(LP(iLayer)%PL(i,j),sp_kind)
+            LP(iLayer)%csrValA(nz_before+3) = REAL(LP(iLayer)%PC(i,j),sp_kind)
+            LP(iLayer)%csrValA(nz_before+4) = REAL(LP(iLayer)%PR(i,j),sp_kind)
+            LP(iLayer)%csrValA(nz_before+5) = REAL(LP(iLayer)%PT(i,j),sp_kind)
+        #else
+            LP(iLayer)%csrValA(nz_before+1) = LP(iLayer)%PB(i,j)
+            LP(iLayer)%csrValA(nz_before+2) = LP(iLayer)%PL(i,j)
+            LP(iLayer)%csrValA(nz_before+3) = LP(iLayer)%PC(i,j)
+            LP(iLayer)%csrValA(nz_before+4) = LP(iLayer)%PR(i,j)
+            LP(iLayer)%csrValA(nz_before+5) = LP(iLayer)%PT(i,j)
+        #endif
+    else
+        #ifdef DOUBLE
+            LP(iLayer)%csrValA(nz_before+1) = REAL(LP(iLayer)%PC(i,j),sp_kind)
+        #else
+            LP(iLayer)%csrValA(nz_before+1) = LP(iLayer)%PC(i,j)
+        #endif
+    endif
+    !/// store the inverse of diagnal coefficients for faster computation ///!
+    #ifdef DOUBLE
+        d_element = REAL(LP(iLayer)%PC(i,j),sp_kind)
+    #else
+        d_element = LP(iLayer)%PC(i,j)
+    #endif
+    if(ABS(d_element).gt.dmin) then
+        LP(iLayer)%vecDInverse(k) = 1.0/d_element
+    elseif(d_element.ge.0.0) then
+        LP(iLayer)%vecDInverse(k) = 1.0/dmin
+    else
+        LP(iLayer)%vecDInverse(k) = -1.0/dmin
+    endif
+    
+endif
+    
+end subroutine assemblePoissonMatrixVector
+
+
+attributes(global) subroutine convertX2Q(LP, iLayer)
+implicit NONE
+type(DeviceLayerParameters) ::  LP(99)
+integer*4, value            ::  iLayer
+integer*4   ::  i, j, k
+
+i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+j = (blockIdx%y-1)*blockDim%y + threadIdx%y
+    
+if(i.le.LP(iLayer)%NX.and.j.le.LP(iLayer)%NY) then
+
+    k = (j-1)*LP(iLayer)%NX + i
+    #ifdef DOUBLE
+        LP(iLayer)%Q(i,j) = DBLE(LP(iLayer)%vecX(k))
+    #else
+        LP(iLayer)%Q(i,j) = LP(iLayer)%vecX(k)
+    #endif
+
+endif
+
+end subroutine convertX2Q
+
+
+
+end module dispersion_kernels
+
+
+
+
+subroutine solveDynamicPressure(GP, LP, iLayer)
+!*****************************************************************************************************************
+!********* This subroutine solves the 2D Poisson-type equation of non-hydrostatic pressure.              *********
+!********* The equation is solved iteratively using Bi-CGSTAB method (van der Vorst, H. A., 1992).       *********
+!********* Incomplete LU (ILU) preconditioning is used to significantly speed up the iteration.          *********
+!********* ILU factorization and sparse matrix-vector multiplication are performed by cuSPARSE library.  *********
+!********* Operations of dense vectors are performed by cuBLAS library.                                  *********
+!*****************************************************************************************************************
+use cudafor
+use cublas_v2
+use cusparse
+use dispersion_kernels
+use VariableDefination
+implicit NONE
+type(DeviceGlobalParameters), managed   ::  GP
+type(DeviceLayerParameters), managed    ::  LP(99)
+integer*4, intent(in)   ::  iLayer
+integer*4               ::  m, nnz !numbers of unknowns and nonzero coefficients 
+real(sp_kind)               ::  rho0, rho, alpha, omega, beta, rc0_v, tc_sc, tc_tc, r_norm, b_norm, threshold !BiCGSTAB scalars
+real(sp_kind), parameter    ::  tolerance = 1.0E-5, dmin = 1.0E-9
+real(sp_kind), parameter    ::  ZERO = 0.0, ONE = 1.0, MINUS_ONE = -1.0
+integer*4, parameter        ::  maxIterations = 300
+type(dim3)  ::  grid, tBlock
+integer*4   ::  iter, i, j, status, ierror
+
+tBlock = dim3(GP%BlockDimX, GP%BlockDimY, 1)
+grid = dim3(CEILING(1.0*LP(iLayer)%NX/tBlock%x), CEILING(1.0*LP(iLayer)%NY/tBlock%y), 1)
+
+m = LP(iLayer)%NX*LP(iLayer)%NY !number of unknowns
+nnz = MAX(5*(LP(iLayer)%NX-2)*(LP(iLayer)%NY-2),0) + 2*LP(iLayer)%NX + 2*LP(iLayer)%NY - 4 !number of non-zero coefficients
+    
+!########### assemble CSR sparse matrices and dense vectors ###########!
+call assemblePoissonMatrixVector<<<grid,tBlock>>>(LP, iLayer, dmin)
+ierror = cudaDeviceSynchronize()
+
+!########### update the value field of the sparse matrix descriptor ###########!
+status = cusparseSpMatSetValues(LP(iLayer)%sparseMatA, LP(iLayer)%csrValA)
+    
+!########### check if the initial guess is accurate enough ###########!
+!// r = b - A * x
+status = cublasScopy(cublasH, m, LP(iLayer)%vecB, 1, LP(iLayer)%vecR, 1) 
+status = cusparseSpMV(cusparseH, CUSPARSE_OPERATION_NON_TRANSPOSE, MINUS_ONE, LP(iLayer)%sparseMatA, LP(iLayer)%dnVecX, &
+                      ONE, LP(iLayer)%dnVecR, CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG1, bufferSparseMatrixDenseVector)
+!// b_norm = || b ||, r_norm = || r ||
+status = cublasNrm2Ex(cublasH, m, LP(iLayer)%vecB, CUDA_R_32F, 1, b_norm, CUDA_R_32F, CUDA_R_32F)
+status = cublasNrm2Ex(cublasH, m, LP(iLayer)%vecR, CUDA_R_32F, 1, r_norm, CUDA_R_32F, CUDA_R_32F)
+threshold = tolerance*b_norm
+if(b_norm.le.dmin) then
+    LP(iLayer)%Q = 0.0; return
+elseif(r_norm.le.threshold) then
+    return
+endif
+        
+!########### perform D-preconditioned Bi-CGSTAB computation ###########!
+
+!// initialize Bi-CGSTAB vectors and scalars
+LP(iLayer)%vecV = 0.0; LP(iLayer)%vecP = 0.0
+rho0 = 1.0; alpha = 1.0; omega = 1.0
+status = cublasScopy(cublasH, m, LP(iLayer)%vecR, 1, LP(iLayer)%vecRC0, 1)
+    
+!// Bi-CGSTAB iterations
+do iter = 1,maxIterations
+    
+    !// 1: rho = (rc0, r)
+    status = cublasDotEx(cublasH, m, LP(iLayer)%vecRC0, CUDA_R_32F, 1, LP(iLayer)%vecR, CUDA_R_32F, 1, rho, CUDA_R_32F, CUDA_R_32F)
+    !// 2: beta = (rho/rho0)(alpha/omega)
+    beta = (rho/rho0)*(alpha/omega)
+    rho0 = rho
+    !// 3: p = r + beta(p - omega*v)
+    status = cublasAxpyEx(cublasH, m, -omega, CUDA_R_32F, LP(iLayer)%vecV, CUDA_R_32F, 1, LP(iLayer)%vecP, CUDA_R_32F, 1, CUDA_R_32F)
+    status = cublasScalEx(cublasH, m, beta, CUDA_R_32F, LP(iLayer)%vecP, CUDA_R_32F, 1, CUDA_R_32F)
+    status = cublasAxpyEx(cublasH, m, ONE, CUDA_R_32F, LP(iLayer)%vecR, CUDA_R_32F, 1, LP(iLayer)%vecP, CUDA_R_32F, 1, CUDA_R_32F)
+    !// 4: solve y from D * y = p
+    !$cuf kernel do <<<*,*>>>
+    do i = 1,m
+        LP(iLayer)%vecY(i) = LP(iLayer)%vecDInverse(i)*LP(iLayer)%vecP(i)
+    enddo
+    !// 5: v = A * y
+    status = cusparseSpMV(cusparseH, CUSPARSE_OPERATION_NON_TRANSPOSE, ONE, LP(iLayer)%sparseMatA, LP(iLayer)%dnVecY, &
+                          ZERO, LP(iLayer)%dnVecV, CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG1, bufferSparseMatrixDenseVector)
+    !// 6: alpha = rho/(rc0,v)
+    status  = cublasDotEx(cublasH, m, LP(iLayer)%vecRC0, CUDA_R_32F, 1, LP(iLayer)%vecV, CUDA_R_32F, 1, rc0_v, CUDA_R_32F, CUDA_R_32F)
+    alpha = rho/rc0_v
+    !// 7: adjust rc0 if rho or rc0_v is too small, and restart the iteration
+    if(ABS(rho).lt.tolerance*r_norm*r_norm.or.ABS(rc0_v).lt.1.0E-24) then
+        status = cublasScopy(cublasH, m, LP(iLayer)%vecR, 1, LP(iLayer)%vecRC0, 1)
+        status = cublasAxpyEx(cublasH, m, 0.5, CUDA_R_32F, LP(iLayer)%vecV, CUDA_R_32F, 1, LP(iLayer)%vecRC0, CUDA_R_32F, 1, CUDA_R_32F)
+        LP(iLayer)%vecV = 0.0; LP(iLayer)%vecP = 0.0
+        rho0 = 1.0; alpha = 1.0; omega = 1.0
+        cycle
+    endif
+    !// 8: s = r - alpha * v
+    status = cublasScopy(cublasH, m, LP(iLayer)%vecR, 1, LP(iLayer)%vecS, 1)
+    status = cublasAxpyEx(cublasH, m, -alpha, CUDA_R_32F, LP(iLayer)%vecV, CUDA_R_32F, 1, LP(iLayer)%vecS, CUDA_R_32F, 1, CUDA_R_32F)
+    !// 9: solve z from D * z = s
+    !$cuf kernel do <<<*,*>>>
+    do i = 1,m
+        LP(iLayer)%vecZ(i) = LP(iLayer)%vecDInverse(i)*LP(iLayer)%vecS(i)
+    enddo
+    !// 10: t = A * z
+    status = cusparseSpMV(cusparseH, CUSPARSE_OPERATION_NON_TRANSPOSE, ONE, LP(iLayer)%sparseMatA, LP(iLayer)%dnVecZ, &
+                          ZERO, LP(iLayer)%dnVecT, CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG1, bufferSparseMatrixDenseVector)
+    !// 11: solve tc from D * tc = t, and sc from D * sc = s
+    !$cuf kernel do <<<*,*>>>
+    do i = 1,m
+        LP(iLayer)%vecTC(i) = LP(iLayer)%vecDInverse(i)*LP(iLayer)%vecT(i)
+        LP(iLayer)%vecSC(i) = LP(iLayer)%vecDInverse(i)*LP(iLayer)%vecS(i)
+    enddo
+    !// 12: omega = (tc,sc)/(tc,tc)
+    status = cublasDotEx(cublasH, m, LP(iLayer)%vecTC, CUDA_R_32F, 1, LP(iLayer)%vecSC, CUDA_R_32F, 1, tc_sc, CUDA_R_32F, CUDA_R_32F)
+    status = cublasDotEx(cublasH, m, LP(iLayer)%vecTC, CUDA_R_32F, 1, LP(iLayer)%vecTC, CUDA_R_32F, 1, tc_tc, CUDA_R_32F, CUDA_R_32F)
+    omega = tc_sc/tc_tc
+    !// 13: x = x + alpha * y + omega * z
+    status = cublasAxpyEx(cublasH, m, alpha, CUDA_R_32F, LP(iLayer)%vecY, CUDA_R_32F, 1, LP(iLayer)%vecX, CUDA_R_32F, 1, CUDA_R_32F)
+    status = cublasAxpyEx(cublasH, m, omega, CUDA_R_32F, LP(iLayer)%vecZ, CUDA_R_32F, 1, LP(iLayer)%vecX, CUDA_R_32F, 1, CUDA_R_32F)
+    !// 14: r = s - omega * t
+    status = cublasScopy(cublasH, m, LP(iLayer)%vecS, 1, LP(iLayer)%vecR, 1)
+    status = cublasAxpyEx(cublasH, m, -omega, CUDA_R_32F, LP(iLayer)%vecT, CUDA_R_32F, 1, LP(iLayer)%vecR, CUDA_R_32F, 1, CUDA_R_32F)
+    !// 15: check if residual is small enough
+    status = cublasNrm2Ex(cublasH, m, LP(iLayer)%vecR, CUDA_R_32F, 1, r_norm, CUDA_R_32F, CUDA_R_32F)
+    if(r_norm.le.threshold) exit
+    
+enddo
+    
+!########### transfer solution vector to grid cells ###########!
+call convertX2Q<<<grid,tBlock>>>(LP, iLayer)
+ierror = cudaDeviceSynchronize()
+    
+end subroutine solveDynamicPressure

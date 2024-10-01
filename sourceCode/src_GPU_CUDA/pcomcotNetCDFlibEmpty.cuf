@@ -1,0 +1,41 @@
+subroutine getBathymetryDataSizeNetCDF(GP, LP, iLayer)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4   ::  iLayer
+
+write(*,*) "ERROR: NetCDF format (.nf) is not supported by PCOMCOT-GPU, it is supported only by the CPU version."
+stop
+
+end subroutine getBathymetryDataSizeNetCDF
+
+
+
+subroutine readBathymetryNetCDF(GP, LP, iLayer)
+
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+integer*4   ::  iLayer
+
+write(*,*) "ERROR: NetCDF format (.nf) is not supported by PCOMCOT-GPU, it is supported only by the CPU version."
+stop
+
+end subroutine readBathymetryNetCDF
+
+
+
+subroutine readInitialElevationNetCDF(GP, LP)
+           
+use VariableDefination
+implicit NONE
+type(HostGlobalParameters)  ::  GP
+type(HostLayerParameters)   ::  LP(99)
+
+write(*,*) "ERROR: NetCDF format (.nf) is not supported by PCOMCOT-GPU, it is supported only by the CPU version."
+stop
+
+end subroutine readInitialElevationNetCDF
