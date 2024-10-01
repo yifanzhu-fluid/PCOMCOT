@@ -1,16 +1,13 @@
 # PCOMCOT
-PCOCMOT is a high-efficiency parallel computer program for simulating nonlinear dispersive tsunami waves. 
-The motivation of this project is to enhance computational efficiency and accuracy for large-scale tsunami simulations. 
+PCOCMOT is a high-efficiency parallel computer program for simulating nonlinear dispersive tsunami waves.
+It is developed by Yifan Zhu and Chao An at Shanghai Jiao Tong University, Shanghai, China.
+The current version (2.1) is parallelized for CPU using the MPI library, and for GPU based on CUDA programming model.
 The main features of PCOMCOT include:
 1) Accounting for wave dispersion by adding non-hydrostatic pressure to the shallow water model COMCOT;
 2) Moving boundary technique for run-up and run-down;
 3) Eddy-viscosity scheme for wave breaking;
 4) One-way and two-way grid nesting for cross-scale tsunami modeling;
 5) Parallel implementation on both CPU and GPU.
-
-PCOMCOT is developed by Yifan Zhu and Prof. Chao An at Shanghai Jiao Tong University. 
-We make the source code open without limitations on its redistribution and modification for research purposes.
-For parallel implementation of PCOMCOT, we provide both a CPU version using the MPI library, and a GPU version based on CUDA FORTRAN.
 We will keep updating the source code, manual, and examples when new features or modules are added.
 
 To publish papers containing use of PCOMCOT or mentioning this model, please cite articles about the algorithms and applications of PCOMCOT.
