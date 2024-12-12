@@ -16,7 +16,4 @@ To publish papers containing use of PCOMCOT or mentioning this model, please cit
 * Wang, X., & Liu, P. L.-F. (2006). An analysis of 2004 Sumatra earthquake fault plane mechanisms and Indian ocean tsunami. Journal of
 Hydraulic Research, 44(2), 147–154. https://doi.org/10.1080/00221686.2006.9521671
 
-If you find code bugs or plan to use PCOMCOT commercially, please contact us via the E-mails below.
-
-zyftop@sjtu.edu.cn (Yifan ZHU)    
-anchao@sjtu.edu.cn (Chao AN)
+If you find code bugs or plan to use PCOMCOT commercially, please contact the developers – Yifan ZHU and Chao AN.
